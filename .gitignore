@@ -1,0 +1,23 @@
+# Local asset folders
+/images/
+/downloads/
+/data/
+
+# .NET build outputs
+/bin/
+/obj/
+/out/
+
+# Visual Studio / IDE
+/.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.vssscc
+*.vspscc
+
+# Logs and temp
+*.log
+*.tmp
+*.bak
