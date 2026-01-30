@@ -1,226 +1,454 @@
-﻿// Program.cs
-// .NET 8
-// Downloads Sentinel-2 L2A RGB bands (B02/B03/B04) for the lowest-cloud scene
-// in a given month over your bbox, using Planetary Computer STAC + SAS signing.
-//
-// Notes:
-// - STAC endpoint: https://planetarycomputer.microsoft.com/api/stac/v1/search  (public)  :contentReference[oaicite:3]{index=3}
-// - Sign endpoint pattern: https://planetarycomputer.microsoft.com/api/sas/v1/sign?href=... :contentReference[oaicite:4]{index=4}
-// - Dataset: sentinel-2-l2a :contentReference[oaicite:5]{index=5}
-
+using System.Globalization;
 using System.Net;
-using System.Text;
-using System.Text.Json;
-
-var bbox = new double[]
-{
-    -103.86731513843112, // minLon (W)
-    50.5123611,          // minLat (S)
-    -102.9133333,        // maxLon (E)
-    50.99259736981789    // maxLat (N)
-};
-
-var year = 2025;
-var month = 5; // May
-var cloudLt = 80; // lenient because you said some clouds are fine
-
-var monthStart = new DateTime(year, month, 1);
-var monthEnd = monthStart.AddMonths(1).AddDays(-1);
 
 var projectRoot = FindProjectRoot(Environment.CurrentDirectory)
     ?? FindProjectRoot(AppContext.BaseDirectory)
     ?? Environment.CurrentDirectory;
 
-var outDir = Path.Combine(projectRoot, "data", $"{year:D4}-{month:D2}");
-Directory.CreateDirectory(outDir);
+var config = AppConfig.Load(projectRoot);
+var mode = ResolveMode(args, config);
 
-using var http = new HttpClient(new HttpClientHandler
+Console.WriteLine($"SentinelGrab starting in '{mode}' mode.");
+
+if (string.Equals(mode, "db", StringComparison.OrdinalIgnoreCase))
 {
-    AutomaticDecompression = DecompressionMethods.All
-});
-http.Timeout = TimeSpan.FromMinutes(10);
-
-// 1) STAC search
-var searchUrl = "https://planetarycomputer.microsoft.com/api/stac/v1/search";
-
-var payload = new
+    await RunDbModeAsync(config, projectRoot);
+}
+else
 {
-    collections = new[] { "sentinel-2-l2a" },
-    bbox = bbox,
-    datetime = $"{monthStart:yyyy-MM-dd}/{monthEnd:yyyy-MM-dd}",
-    limit = 100,
-    query = new Dictionary<string, object>
+    await RunCliModeAsync(config, projectRoot, args);
+}
+
+static async Task RunCliModeAsync(AppConfig config, string projectRoot, string[] args)
+{
+    var bboxText = GetArgValue(args, "--bbox") ?? config.Cli.Bbox ?? "-103.86731513843112,50.5123611,-102.9133333,50.99259736981789";
+    var bbox = ParseBbox(bboxText);
+
+    var year = GetArgValue(args, "--year") is { } y && int.TryParse(y, out var yv) ? yv : config.Cli.Year;
+    var month = GetArgValue(args, "--month") is { } m && int.TryParse(m, out var mv) ? mv : config.Cli.Month;
+    var day = GetArgValue(args, "--day") is { } d && int.TryParse(d, out var dv) ? dv : (int?)null;
+    var cloudMax = GetArgValue(args, "--cloud") is { } c && int.TryParse(c, out var cv) ? cv : config.Cli.CloudCoverMax;
+
+    DateTime rangeStart;
+    DateTime rangeEnd;
+    string outputFolder;
+    if (day.HasValue)
     {
-        ["eo:cloud_cover"] = new Dictionary<string, object> { ["lt"] = cloudLt }
+        var date = new DateTime(year, month, day.Value);
+        rangeStart = date.Date;
+        rangeEnd = date.Date;
+        outputFolder = $"{year:D4}-{month:D2}-{day.Value:D2}";
     }
-};
-
-var payloadJson = JsonSerializer.Serialize(payload);
-var searchResp = await http.PostAsync(
-    searchUrl,
-    new StringContent(payloadJson, Encoding.UTF8, "application/json")
-);
-searchResp.EnsureSuccessStatusCode();
-
-var searchBody = await searchResp.Content.ReadAsStringAsync();
-var doc = JsonDocument.Parse(searchBody);
-
-var features = doc.RootElement.GetProperty("features");
-if (features.GetArrayLength() == 0)
-{
-    Console.WriteLine("No scenes found for that month/window.");
-    return;
-}
-
-// pick lowest eo:cloud_cover
-JsonElement? best = null;
-double bestCloud = double.MaxValue;
-
-foreach (var f in features.EnumerateArray())
-{
-    if (!f.TryGetProperty("properties", out var props)) continue;
-    if (!props.TryGetProperty("eo:cloud_cover", out var cc)) continue;
-    if (cc.ValueKind != JsonValueKind.Number) continue;
-
-    var ccv = cc.GetDouble();
-    if (ccv < bestCloud)
+    else
     {
-        bestCloud = ccv;
-        best = f;
+        var monthStart = new DateTime(year, month, 1);
+        rangeStart = monthStart;
+        rangeEnd = monthStart.AddMonths(1).AddDays(-1);
+        outputFolder = $"{year:D4}-{month:D2}";
     }
-}
 
-if (best is null)
-{
-    Console.WriteLine("Scenes returned, but none had eo:cloud_cover.");
-    return;
-}
+    var workRoot = ResolveRootPath(config.WorkRoot ?? "data", projectRoot);
+    var outDir = Path.Combine(workRoot, outputFolder);
+    Directory.CreateDirectory(outDir);
 
-var bestItem = best.Value;
+    using var http = CreateHttpClient();
+    var stac = new StacClient(http);
+    var items = await stac.SearchAsync(bbox, rangeStart, rangeEnd, cloudMax, 100);
 
-var itemId = bestItem.GetProperty("id").GetString() ?? "(no id)";
-Console.WriteLine($"Best scene: {itemId}  cloud={bestCloud:0.0}%");
-
-await File.WriteAllTextAsync(Path.Combine(outDir, "item.json"), bestItem.GetRawText());
-
-// 2) Download RGB band assets (B02/B03/B04)
-// Each asset href needs signing (SAS) before download. :contentReference[oaicite:6]{index=6}
-var assets = bestItem.GetProperty("assets");
-
-await DownloadBandAsync("B02"); // Blue
-await DownloadBandAsync("B03"); // Green
-await DownloadBandAsync("B04"); // Red
-
-Console.WriteLine("Done.");
-
-async Task DownloadBandAsync(string bandKey)
-{
-    if (!assets.TryGetProperty(bandKey, out var asset))
+    if (items.Count == 0)
     {
-        Console.WriteLine($"Asset {bandKey} missing on item (unexpected).");
+        Console.WriteLine(day.HasValue ? "No scenes found for that date/window." : "No scenes found for that month/window.");
         return;
     }
 
-    var href = asset.GetProperty("href").GetString();
-    if (string.IsNullOrWhiteSpace(href))
+    var best = items.OrderBy(i => i.CloudCover ?? double.MaxValue).First();
+    Console.WriteLine($"Best scene: {best.Id} cloud={(best.CloudCover ?? 0):0.0}%");
+
+    await File.WriteAllTextAsync(Path.Combine(outDir, "item.json"), best.RawJson);
+
+    var bands = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "B02", "B03", "B04", "SCL" };
+    var downloader = new BandDownloader(http, stac);
+    await downloader.DownloadBandsAsync(best, bands, outDir);
+
+    Console.WriteLine("Done.");
+}
+
+static async Task RunDbModeAsync(AppConfig config, string projectRoot)
+{
+    if (string.IsNullOrWhiteSpace(config.SqlConnectionString))
     {
-        Console.WriteLine($"Asset {bandKey} href missing.");
+        Console.WriteLine("SqlConnectionString is not configured.");
         return;
     }
 
-    var signed = await SignHrefAsync(href);
-    var filePath = Path.Combine(outDir, $"{bandKey}.tif");
-    var tempPath = filePath + ".part";
+    var repo = new JobRepository(config.SqlConnectionString);
+    var job = await repo.ClaimNextJobAsync();
 
-    if (File.Exists(filePath) && new FileInfo(filePath).Length > 0)
+    if (job is null)
     {
-        Console.WriteLine($"{bandKey}: already downloaded.");
+        Console.WriteLine("No queued jobs found.");
         return;
     }
-    else if (File.Exists(filePath))
+
+    Console.WriteLine($"Claimed JobId {job.JobId} (Status={job.Status}).");
+
+    try
     {
-        File.Delete(filePath);
+        await ProcessJobAsync(job, repo, config, projectRoot);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Job {job.JobId} failed: {ex.Message}");
+        await repo.MarkJobFailedAsync(job.JobId);
+    }
+}
+
+static async Task ProcessJobAsync(SentinelGrabJob job, JobRepository repo, AppConfig config, string projectRoot)
+{
+    var products = await repo.GetPendingProductsAsync(job.JobId);
+    if (products.Count == 0)
+    {
+        Console.WriteLine("No queued/failed products found; inserting default RGB product.");
+        products.Add(await repo.InsertDefaultProductAsync(job.JobId));
     }
 
-    var maxAttempts = 3;
-    var baseDelay = TimeSpan.FromMinutes(2);
+    var (dateFrom, dateTo, dateKey) = ResolveDateRange(job);
+    var bbox = ResolveBbox(job);
 
-    for (var attempt = 1; attempt <= maxAttempts; attempt++)
+    var cloudMax = job.CloudCoverMax ?? 100;
+    var maxScenes = Math.Max(1, job.MaxScenes ?? 1);
+    var wantMultiple = job.PreferMosaic || maxScenes > 1;
+    if (job.PreferMosaic && maxScenes < 2)
     {
+        Console.WriteLine("PreferMosaic=1 but MaxScenes < 2; only one scene will be downloaded.");
+    }
+
+    var bandSet = ComputeRequiredBands(products);
+    bandSet.Add("SCL");
+
+    using var http = CreateHttpClient();
+    var stac = new StacClient(http);
+    var items = await stac.SearchAsync(bbox, dateFrom, dateTo, cloudMax, 100);
+
+    if (items.Count == 0)
+    {
+        Console.WriteLine("No scenes found for job.");
+        await repo.MarkJobFailedAsync(job.JobId);
+        return;
+    }
+
+    var selected = items
+        .OrderBy(i => i.CloudCover ?? double.MaxValue)
+        .Take(wantMultiple ? maxScenes : 1)
+        .ToList();
+
+    Console.WriteLine($"Selected {selected.Count} scene(s). Bands: {string.Join(", ", bandSet)}");
+
+    var workRoot = ResolveRootPath(config.WorkRoot ?? "data", projectRoot);
+    var jobRoot = Path.Combine(workRoot, job.JobId.ToString(CultureInfo.InvariantCulture));
+    Directory.CreateDirectory(jobRoot);
+
+    var downloader = new BandDownloader(http, stac);
+    foreach (var item in selected)
+    {
+        var sceneFolder = selected.Count == 1 && !wantMultiple
+            ? Path.Combine(jobRoot, "single")
+            : Path.Combine(jobRoot, SanitizePathSegment(item.Id));
+
+        Directory.CreateDirectory(sceneFolder);
+        await File.WriteAllTextAsync(Path.Combine(sceneFolder, "item.json"), item.RawJson);
+        await downloader.DownloadBandsAsync(item, bandSet, sceneFolder);
+    }
+
+    var outputRoot = job.OutputRootPath ?? config.OutputRootPath;
+    if (string.IsNullOrWhiteSpace(outputRoot))
+    {
+        throw new InvalidOperationException("OutputRootPath is not configured on job or appsettings.");
+    }
+
+    if (string.IsNullOrWhiteSpace(config.OsgeoRoot))
+    {
+        throw new InvalidOperationException("OsgeoRoot is not configured.");
+    }
+
+    var outputRootPath = ResolveRootPath(outputRoot, projectRoot);
+    var scriptRunner = new PowerShellScriptRunner();
+
+    foreach (var product in products)
+    {
+        var productCode = product.ProductCode.Trim().ToUpperInvariant();
+        var productSubPath = string.IsNullOrWhiteSpace(product.OutputSubPath)
+            ? product.ProductCode.Trim().ToLowerInvariant()
+            : product.OutputSubPath.Trim();
+
+        await repo.UpdateJobProductStatusAsync(product.JobProductId, "Running", null, "Starting script.");
+
+        var scriptPath = Path.Combine(projectRoot, "scripts", $"BuildTiles_{productCode}.ps1");
+        if (!File.Exists(scriptPath))
+        {
+            await repo.UpdateJobProductStatusAsync(product.JobProductId, "Failed", "Script not found.", scriptPath);
+            continue;
+        }
+
+        var zoomMin = job.ZoomMin ?? 10;
+        var zoomMax = job.ZoomMax ?? 14;
+        var processes = Math.Max(1, config.DefaultProcesses);
+
+        var parameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["JobId"] = job.JobId.ToString(CultureInfo.InvariantCulture),
+            ["DateKey"] = dateKey,
+            ["InputDir"] = jobRoot,
+            ["OutputRootPath"] = outputRootPath,
+            ["ProductSubPath"] = productSubPath,
+            ["ZoomMin"] = zoomMin.ToString(CultureInfo.InvariantCulture),
+            ["ZoomMax"] = zoomMax.ToString(CultureInfo.InvariantCulture),
+            ["OsgeoRoot"] = config.OsgeoRoot,
+            ["Processes"] = processes.ToString(CultureInfo.InvariantCulture)
+        };
+
+        if (productCode == "RGB")
+        {
+            parameters["ScaleMaxRGB"] = config.DefaultScaleMaxRGB.ToString(CultureInfo.InvariantCulture);
+        }
+        else
+        {
+            parameters["IndexMin"] = config.DefaultNdviMin.ToString(CultureInfo.InvariantCulture);
+            parameters["IndexMax"] = config.DefaultNdviMax.ToString(CultureInfo.InvariantCulture);
+        }
+
         try
         {
-            Console.WriteLine($"{bandKey}: downloading (attempt {attempt}/{maxAttempts})...");
-            using var resp = await http.GetAsync(signed, HttpCompletionOption.ResponseHeadersRead);
-            resp.EnsureSuccessStatusCode();
+            var result = await scriptRunner.RunAsync(scriptPath, parameters);
+            var combinedLog = $"ExitCode={result.ExitCode}; Duration={result.Duration};\nSTDOUT:\n{result.Stdout}\nSTDERR:\n{result.Stderr}";
 
-            if (File.Exists(tempPath))
+            if (result.ExitCode == 0)
             {
-                File.Delete(tempPath);
-            }
+                var outputDir = Path.Combine(outputRootPath, productSubPath, dateKey);
+                var log = $"Tiles created at: {outputDir}. Template: {outputDir}\\{{z}}\\{{x}}\\{{y}}.png\n{combinedLog}";
+                await repo.UpdateJobProductStatusAsync(product.JobProductId, "Succeeded", null, Truncate(log));
 
-            await using (var fs = File.Create(tempPath))
+                var available = new AvailableLayer
+                {
+                    JobId = job.JobId,
+                    JobProductId = product.JobProductId,
+                    ProductCode = productCode,
+                    DateKey = dateKey,
+                    DateFrom = dateFrom.Date,
+                    DateTo = dateTo.Date,
+                    BboxMinLon = bbox.MinLon,
+                    BboxMinLat = bbox.MinLat,
+                    BboxMaxLon = bbox.MaxLon,
+                    BboxMaxLat = bbox.MaxLat,
+                    OutputRootPath = outputRootPath,
+                    ProductSubPath = productSubPath,
+                    OutputDir = outputDir
+                };
+
+                await repo.UpsertAvailableLayerAsync(available);
+            }
+            else
             {
-                await resp.Content.CopyToAsync(fs);
+                await repo.UpdateJobProductStatusAsync(product.JobProductId, "Failed", Truncate(result.Stderr), Truncate(combinedLog));
             }
-
-            if (File.Exists(filePath))
-            {
-                File.Delete(filePath);
-            }
-
-            File.Move(tempPath, filePath);
-
-            Console.WriteLine($"{bandKey}: saved {new FileInfo(filePath).Length / 1024 / 1024.0:0.0} MB");
-            return;
         }
         catch (Exception ex)
         {
-            if (File.Exists(tempPath))
-            {
-                File.Delete(tempPath);
-            }
-
-            if (File.Exists(filePath))
-            {
-                File.Delete(filePath);
-            }
-
-            if (attempt == maxAttempts)
-            {
-                Console.WriteLine($"{bandKey}: failed after {maxAttempts} attempts.");
-                throw;
-            }
-
-            var delay = TimeSpan.FromMinutes(baseDelay.TotalMinutes * Math.Pow(2, attempt - 1));
-            Console.WriteLine($"{bandKey}: error '{ex.Message}'. Waiting {delay.TotalMinutes:0} minutes before retry.");
-            await Task.Delay(delay);
+            await repo.UpdateJobProductStatusAsync(product.JobProductId, "Failed", Truncate(ex.Message), Truncate(ex.ToString()));
         }
+    }
+
+    var counts = await repo.GetJobProductStatusCountsAsync(job.JobId);
+    if (counts.Total == 0)
+    {
+        await repo.MarkJobFailedAsync(job.JobId);
+        Console.WriteLine("No products found to evaluate job status.");
+        return;
+    }
+
+    if (counts.Failed == 0 && counts.Succeeded == counts.Total)
+    {
+        await repo.MarkJobSucceededAsync(job.JobId);
+        Console.WriteLine($"Job {job.JobId} succeeded.");
+    }
+    else
+    {
+        await repo.MarkJobFailedAsync(job.JobId);
+        Console.WriteLine($"Job {job.JobId} failed. Succeeded={counts.Succeeded}, Failed={counts.Failed}, Total={counts.Total}.");
     }
 }
 
-static async Task<string> SignHrefAsync(string href)
+static HashSet<string> ComputeRequiredBands(IEnumerable<SentinelGrabJobProduct> products)
 {
-    // Observed/commonly used Planetary Computer signing endpoint:
-    //   https://planetarycomputer.microsoft.com/api/sas/v1/sign?href={URLENCODED_HREF} :contentReference[oaicite:7]{index=7}
-    // Returns JSON with a "href" containing the signed URL. :contentReference[oaicite:8]{index=8}
-    var signEndpoint = "https://planetarycomputer.microsoft.com/api/sas/v1/sign?href=" + Uri.EscapeDataString(href);
+    var bands = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-    using var http = new HttpClient();
-    http.Timeout = TimeSpan.FromSeconds(60);
-
-    var resp = await http.GetAsync(signEndpoint);
-    resp.EnsureSuccessStatusCode();
-
-    var body = await resp.Content.ReadAsStringAsync();
-    using var json = JsonDocument.Parse(body);
-
-    if (json.RootElement.TryGetProperty("href", out var signedHref))
+    foreach (var product in products)
     {
-        return signedHref.GetString() ?? throw new Exception("Signer returned null href.");
+        var code = product.ProductCode.Trim().ToUpperInvariant();
+        switch (code)
+        {
+            case "RGB":
+                bands.Add("B02");
+                bands.Add("B03");
+                bands.Add("B04");
+                break;
+            case "NDVI":
+                bands.Add("B08");
+                bands.Add("B04");
+                break;
+            case "NDMI":
+                bands.Add("B08");
+                bands.Add("B11");
+                break;
+            case "NDRE":
+                bands.Add("B8A");
+                bands.Add("B05");
+                break;
+        }
     }
 
-    // Sometimes APIs return {"signedHref": "..."} etc. If this ever trips, we’ll adjust.
-    throw new Exception("Signer response did not include 'href'. Body: " + body);
+    return bands;
+}
+
+static (DateTime From, DateTime To, string DateKey) ResolveDateRange(SentinelGrabJob job)
+{
+    if (job.DateFrom.HasValue && job.DateTo.HasValue)
+    {
+        var key = job.DateKey ?? job.DateFrom.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        return (job.DateFrom.Value.Date, job.DateTo.Value.Date, key);
+    }
+
+    if (!string.IsNullOrWhiteSpace(job.DateKey))
+    {
+        var dateKey = job.DateKey.Trim();
+        if (DateTime.TryParseExact(dateKey, "yyyy-MM", CultureInfo.InvariantCulture, DateTimeStyles.None, out var month))
+        {
+            var start = new DateTime(month.Year, month.Month, 1);
+            var end = start.AddMonths(1).AddDays(-1);
+            return (start, end, dateKey);
+        }
+
+        if (DateTime.TryParseExact(dateKey, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var day))
+        {
+            return (day.Date, day.Date, dateKey);
+        }
+
+        if (DateTime.TryParseExact(dateKey, "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var compact))
+        {
+            var dk = compact.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            return (compact.Date, compact.Date, dk);
+        }
+    }
+
+    throw new InvalidOperationException("Job DateFrom/DateTo or DateKey is required.");
+}
+
+static Bbox ResolveBbox(SentinelGrabJob job)
+{
+    if (job.BboxMinLon.HasValue && job.BboxMinLat.HasValue && job.BboxMaxLon.HasValue && job.BboxMaxLat.HasValue)
+    {
+        return new Bbox(job.BboxMinLon.Value, job.BboxMinLat.Value, job.BboxMaxLon.Value, job.BboxMaxLat.Value);
+    }
+
+    if (!string.IsNullOrWhiteSpace(job.Bbox))
+    {
+        return ParseBbox(job.Bbox);
+    }
+
+    throw new InvalidOperationException("Job bbox is required (BboxMinLon/Lat/MaxLon/MaxLat or Bbox string).");
+}
+
+static Bbox ParseBbox(string bboxText)
+{
+    var parts = bboxText.Split(new[] { ',', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+    if (parts.Length != 4)
+    {
+        throw new FormatException("Bbox must have 4 numbers: minLon,minLat,maxLon,maxLat.");
+    }
+
+    return new Bbox(
+        double.Parse(parts[0], CultureInfo.InvariantCulture),
+        double.Parse(parts[1], CultureInfo.InvariantCulture),
+        double.Parse(parts[2], CultureInfo.InvariantCulture),
+        double.Parse(parts[3], CultureInfo.InvariantCulture)
+    );
+}
+
+static string ResolveMode(string[] args, AppConfig config)
+{
+    if (args.Any(a => string.Equals(a, "--db", StringComparison.OrdinalIgnoreCase)))
+    {
+        return "db";
+    }
+
+    var modeArg = GetArgValue(args, "--mode");
+    if (!string.IsNullOrWhiteSpace(modeArg))
+    {
+        return modeArg.Trim();
+    }
+
+    return string.IsNullOrWhiteSpace(config.Mode) ? "cli" : config.Mode;
+}
+
+static string? GetArgValue(string[] args, string name)
+{
+    for (var i = 0; i < args.Length; i++)
+    {
+        if (string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+        {
+            return args[i + 1];
+        }
+    }
+
+    return null;
+}
+
+static HttpClient CreateHttpClient()
+{
+    var http = new HttpClient(new HttpClientHandler
+    {
+        AutomaticDecompression = DecompressionMethods.All
+    })
+    {
+        Timeout = TimeSpan.FromMinutes(10)
+    };
+
+    return http;
+}
+
+static string ResolveRootPath(string path, string projectRoot)
+{
+    if (Path.IsPathRooted(path))
+    {
+        return Path.GetFullPath(path);
+    }
+
+    return Path.GetFullPath(Path.Combine(projectRoot, path));
+}
+
+static string SanitizePathSegment(string value)
+{
+    var invalid = Path.GetInvalidFileNameChars();
+    var buffer = value.ToCharArray();
+    for (var i = 0; i < buffer.Length; i++)
+    {
+        if (invalid.Contains(buffer[i]))
+        {
+            buffer[i] = '_';
+        }
+    }
+
+    return new string(buffer);
+}
+
+static string Truncate(string? value, int maxLen = 20000)
+{
+    if (string.IsNullOrEmpty(value))
+    {
+        return string.Empty;
+    }
+
+    return value.Length <= maxLen ? value : value.Substring(0, maxLen);
 }
 
 static string? FindProjectRoot(string startDir)
