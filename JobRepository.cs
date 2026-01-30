@@ -350,10 +350,10 @@ WHERE JobId = @JobId;";
         var dateTo = GetNullableDateTime("DateTo");
         var dateKey = GetNullableString("DateKey");
 
-        var bboxMinLon = GetNullableDouble("BboxMinLon");
-        var bboxMinLat = GetNullableDouble("BboxMinLat");
-        var bboxMaxLon = GetNullableDouble("BboxMaxLon");
-        var bboxMaxLat = GetNullableDouble("BboxMaxLat");
+        var bboxMinLon = GetNullableDouble("BboxMinLon") ?? GetNullableDouble("MinLon");
+        var bboxMinLat = GetNullableDouble("BboxMinLat") ?? GetNullableDouble("MinLat");
+        var bboxMaxLon = GetNullableDouble("BboxMaxLon") ?? GetNullableDouble("MaxLon");
+        var bboxMaxLat = GetNullableDouble("BboxMaxLat") ?? GetNullableDouble("MaxLat");
         var bbox = GetNullableString("Bbox");
 
         var cloudCoverMax = GetNullableInt("CloudCoverMax");
@@ -365,6 +365,7 @@ WHERE JobId = @JobId;";
         var zoomMin = GetNullableInt("ZoomMin");
         var zoomMax = GetNullableInt("ZoomMax");
         var outputRootPath = GetNullableString("OutputRootPath");
+        var sceneId = GetNullableString("SceneId");
 
         return new SentinelGrabJob
         {
@@ -385,7 +386,8 @@ WHERE JobId = @JobId;";
             MaxScenes = maxScenes,
             ZoomMin = zoomMin,
             ZoomMax = zoomMax,
-            OutputRootPath = outputRootPath
+            OutputRootPath = outputRootPath,
+            SceneId = sceneId
         };
     }
 }

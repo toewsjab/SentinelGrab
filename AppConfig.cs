@@ -23,12 +23,10 @@ public sealed class AppConfig
         var configRoot = builder.Build();
         var config = configRoot.Get<AppConfig>() ?? new AppConfig();
 
-        var connFromConnStrings = configRoot.GetConnectionString("SqlConnectionString")
-            ?? configRoot.GetConnectionString("SentinelGrab");
-
-        if (!string.IsNullOrWhiteSpace(connFromConnStrings))
+        var envConn = configRoot["JTFConn"];
+        if (!string.IsNullOrWhiteSpace(envConn))
         {
-            config.SqlConnectionString = connFromConnStrings;
+            config.SqlConnectionString = envConn;
         }
 
         return config;

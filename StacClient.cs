@@ -40,36 +40,35 @@ public sealed class StacClient
 
         foreach (var feature in features.EnumerateArray())
         {
-            var id = feature.GetProperty("id").GetString() ?? "(no id)";
-
-            double? cloud = null;
-            if (feature.TryGetProperty("properties", out var props)
-                && props.TryGetProperty("eo:cloud_cover", out var cc)
-                && cc.ValueKind == JsonValueKind.Number)
-            {
-                cloud = cc.GetDouble();
-            }
-
-            var assets = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            if (feature.TryGetProperty("assets", out var assetObj))
-            {
-                foreach (var assetProp in assetObj.EnumerateObject())
-                {
-                    if (assetProp.Value.TryGetProperty("href", out var hrefEl))
-                    {
-                        var href = hrefEl.GetString();
-                        if (!string.IsNullOrWhiteSpace(href))
-                        {
-                            assets[assetProp.Name] = href;
-                        }
-                    }
-                }
-            }
-
-            items.Add(new StacItem(id, cloud, assets, feature.GetRawText()));
+            items.Add(ParseFeature(feature));
         }
 
         return items;
+    }
+
+    public async Task<StacItem?> GetByIdAsync(string id)
+    {
+        var payload = new
+        {
+            collections = new[] { "sentinel-2-l2a" },
+            ids = new[] { id },
+            limit = 1
+        };
+
+        var payloadJson = JsonSerializer.Serialize(payload);
+        using var resp = await _http.PostAsync(SearchUrl, new StringContent(payloadJson, Encoding.UTF8, "application/json"));
+        resp.EnsureSuccessStatusCode();
+
+        var body = await resp.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(body);
+
+        var features = doc.RootElement.GetProperty("features");
+        foreach (var feature in features.EnumerateArray())
+        {
+            return ParseFeature(feature);
+        }
+
+        return null;
     }
 
     public async Task<string> SignHrefAsync(string href)
@@ -87,5 +86,36 @@ public sealed class StacClient
         }
 
         throw new Exception("Signer response did not include 'href'. Body: " + body);
+    }
+
+    private static StacItem ParseFeature(JsonElement feature)
+    {
+        var id = feature.GetProperty("id").GetString() ?? "(no id)";
+
+        double? cloud = null;
+        if (feature.TryGetProperty("properties", out var props)
+            && props.TryGetProperty("eo:cloud_cover", out var cc)
+            && cc.ValueKind == JsonValueKind.Number)
+        {
+            cloud = cc.GetDouble();
+        }
+
+        var assets = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (feature.TryGetProperty("assets", out var assetObj))
+        {
+            foreach (var assetProp in assetObj.EnumerateObject())
+            {
+                if (assetProp.Value.TryGetProperty("href", out var hrefEl))
+                {
+                    var href = hrefEl.GetString();
+                    if (!string.IsNullOrWhiteSpace(href))
+                    {
+                        assets[assetProp.Name] = href;
+                    }
+                }
+            }
+        }
+
+        return new StacItem(id, cloud, assets, feature.GetRawText());
     }
 }

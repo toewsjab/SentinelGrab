@@ -70,7 +70,50 @@ static async Task RunCliModeAsync(AppConfig config, string projectRoot, string[]
     var downloader = new BandDownloader(http, stac);
     await downloader.DownloadBandsAsync(best, bands, outDir);
 
-    Console.WriteLine("Done.");
+    if (string.IsNullOrWhiteSpace(config.OutputRootPath))
+    {
+        Console.WriteLine("OutputRootPath is not configured; skipping tile generation.");
+        return;
+    }
+
+    if (string.IsNullOrWhiteSpace(config.OsgeoRoot))
+    {
+        Console.WriteLine("OsgeoRoot is not configured; skipping tile generation.");
+        return;
+    }
+
+    var outputRootPath = ResolveRootPath(config.OutputRootPath, projectRoot);
+    var scriptPath = Path.Combine(projectRoot, "scripts", "BuildTiles_RGB.ps1");
+    if (!File.Exists(scriptPath))
+    {
+        Console.WriteLine($"Script not found: {scriptPath}. Skipping tile generation.");
+        return;
+    }
+
+    var parameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["JobId"] = "0",
+        ["DateKey"] = outputFolder,
+        ["InputDir"] = outDir,
+        ["OutputRootPath"] = outputRootPath,
+        ["OsgeoRoot"] = config.OsgeoRoot,
+        ["ScaleMaxRGB"] = config.DefaultScaleMaxRGB.ToString(CultureInfo.InvariantCulture),
+        ["Processes"] = Math.Max(1, config.DefaultProcesses).ToString(CultureInfo.InvariantCulture)
+    };
+
+    var scriptRunner = new PowerShellScriptRunner();
+    var result = await scriptRunner.RunAsync(scriptPath, parameters);
+    var status = result.ExitCode == 0 ? "Tile generation completed." : "Tile generation failed.";
+    Console.WriteLine($"{status} ExitCode={result.ExitCode}; Duration={result.Duration}.");
+    if (!string.IsNullOrWhiteSpace(result.Stdout))
+    {
+        Console.WriteLine(Truncate(result.Stdout));
+    }
+
+    if (!string.IsNullOrWhiteSpace(result.Stderr))
+    {
+        Console.WriteLine(Truncate(result.Stderr));
+    }
 }
 
 static async Task RunDbModeAsync(AppConfig config, string projectRoot)
@@ -128,13 +171,32 @@ static async Task ProcessJobAsync(SentinelGrabJob job, JobRepository repo, AppCo
 
     using var http = CreateHttpClient();
     var stac = new StacClient(http);
-    var items = await stac.SearchAsync(bbox, dateFrom, dateTo, cloudMax, 100);
-
-    if (items.Count == 0)
+    List<StacItem> items;
+    var sceneId = job.SceneId?.Trim();
+    if (!string.IsNullOrWhiteSpace(sceneId))
     {
-        Console.WriteLine("No scenes found for job.");
-        await repo.MarkJobFailedAsync(job.JobId);
-        return;
+        Console.WriteLine($"Using SceneId {sceneId}.");
+        var item = await stac.GetByIdAsync(sceneId);
+        if (item is null)
+        {
+            Console.WriteLine($"No scene found for SceneId {sceneId}.");
+            await repo.MarkJobFailedAsync(job.JobId);
+            return;
+        }
+
+        items = new List<StacItem> { item };
+        wantMultiple = false;
+        maxScenes = 1;
+    }
+    else
+    {
+        items = await stac.SearchAsync(bbox, dateFrom, dateTo, cloudMax, 100);
+        if (items.Count == 0)
+        {
+            Console.WriteLine("No scenes found for job.");
+            await repo.MarkJobFailedAsync(job.JobId);
+            return;
+        }
     }
 
     var selected = items

@@ -18,6 +18,7 @@ public sealed record SentinelGrabJob
     public int? ZoomMin { get; init; }
     public int? ZoomMax { get; init; }
     public string? OutputRootPath { get; init; }
+    public string? SceneId { get; init; }
 }
 
 public sealed record SentinelGrabJobProduct
