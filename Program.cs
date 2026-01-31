@@ -252,7 +252,7 @@ static async Task ProcessJobAsync(SentinelGrabJob job, JobRepository repo, AppCo
             continue;
         }
 
-        var zoomMin = job.ZoomMin ?? 10;
+        var zoomMin = job.ZoomMin ?? 8;
         var zoomMax = job.ZoomMax ?? 14;
         var processes = Math.Max(1, config.DefaultProcesses);
 

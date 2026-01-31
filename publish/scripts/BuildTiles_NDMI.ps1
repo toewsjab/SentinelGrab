@@ -9,7 +9,7 @@ param(
   [Parameter(Mandatory=$true)][string]$OutputRootPath,
   [Parameter(Mandatory=$true)][string]$OsgeoRoot,
 
-  [int]$ZoomMin = 12,
+  [int]$ZoomMin = 8,
   [int]$ZoomMax = 16,
   [string]$ProductSubPath = "ndmi",
 
