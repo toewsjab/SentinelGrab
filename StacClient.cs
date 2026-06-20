@@ -30,7 +30,9 @@ public sealed class StacClient
         };
 
         var payloadJson = JsonSerializer.Serialize(payload);
-        using var resp = await _http.PostAsync(SearchUrl, new StringContent(payloadJson, Encoding.UTF8, "application/json"));
+        using var resp = await SendWithRetryAsync(
+            () => _http.PostAsync(SearchUrl, new StringContent(payloadJson, Encoding.UTF8, "application/json")),
+            "STAC search");
         resp.EnsureSuccessStatusCode();
 
         var searchBody = await resp.Content.ReadAsStringAsync();
@@ -71,7 +73,9 @@ public sealed class StacClient
         };
 
         var payloadJson = JsonSerializer.Serialize(payload);
-        using var resp = await _http.PostAsync(SearchUrl, new StringContent(payloadJson, Encoding.UTF8, "application/json"));
+        using var resp = await SendWithRetryAsync(
+            () => _http.PostAsync(SearchUrl, new StringContent(payloadJson, Encoding.UTF8, "application/json")),
+            "STAC lookup");
         resp.EnsureSuccessStatusCode();
 
         var body = await resp.Content.ReadAsStringAsync();
@@ -89,7 +93,7 @@ public sealed class StacClient
     public async Task<string> SignHrefAsync(string href)
     {
         var signEndpoint = "https://planetarycomputer.microsoft.com/api/sas/v1/sign?href=" + Uri.EscapeDataString(href);
-        using var resp = await _http.GetAsync(signEndpoint);
+        using var resp = await SendWithRetryAsync(() => _http.GetAsync(signEndpoint), "STAC asset signing");
         resp.EnsureSuccessStatusCode();
 
         var body = await resp.Content.ReadAsStringAsync();
@@ -101,6 +105,75 @@ public sealed class StacClient
         }
 
         throw new Exception("Signer response did not include 'href'. Body: " + body);
+    }
+
+    private static async Task<HttpResponseMessage> SendWithRetryAsync(
+        Func<Task<HttpResponseMessage>> send,
+        string operationName)
+    {
+        const int maxAttempts = 5;
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            var resp = await send();
+            if (!ShouldRetry(resp.StatusCode) || attempt == maxAttempts)
+            {
+                return resp;
+            }
+
+            var delay = GetRetryDelay(resp, attempt);
+            Console.WriteLine($"{operationName}: received {(int)resp.StatusCode} {resp.ReasonPhrase}; waiting {delay.TotalSeconds:0} seconds before retry {attempt + 1}/{maxAttempts}.");
+            resp.Dispose();
+            await Task.Delay(delay);
+        }
+
+        throw new InvalidOperationException($"{operationName} retry loop exited unexpectedly.");
+    }
+
+    private static bool ShouldRetry(HttpStatusCode statusCode)
+    {
+        return statusCode == HttpStatusCode.TooManyRequests
+            || statusCode == HttpStatusCode.RequestTimeout
+            || statusCode == HttpStatusCode.InternalServerError
+            || statusCode == HttpStatusCode.BadGateway
+            || statusCode == HttpStatusCode.ServiceUnavailable
+            || statusCode == HttpStatusCode.GatewayTimeout;
+    }
+
+    private static TimeSpan GetRetryDelay(HttpResponseMessage resp, int attempt)
+    {
+        var retryAfter = resp.Headers.RetryAfter;
+        if (retryAfter?.Delta is { } delta && delta > TimeSpan.Zero)
+        {
+            return ClampDelay(delta);
+        }
+
+        if (retryAfter?.Date is { } date)
+        {
+            var fromHeader = date - DateTimeOffset.UtcNow;
+            if (fromHeader > TimeSpan.Zero)
+            {
+                return ClampDelay(fromHeader);
+            }
+        }
+
+        var seconds = Math.Min(300, 15 * Math.Pow(2, attempt - 1));
+        return TimeSpan.FromSeconds(seconds);
+    }
+
+    private static TimeSpan ClampDelay(TimeSpan delay)
+    {
+        if (delay < TimeSpan.FromSeconds(5))
+        {
+            return TimeSpan.FromSeconds(5);
+        }
+
+        if (delay > TimeSpan.FromMinutes(10))
+        {
+            return TimeSpan.FromMinutes(10);
+        }
+
+        return delay;
     }
 
     private static StacItem ParseFeature(JsonElement feature)

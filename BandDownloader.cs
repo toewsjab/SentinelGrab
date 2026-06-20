@@ -17,6 +17,13 @@ public sealed class BandDownloader
 
         foreach (var bandKey in bandKeys)
         {
+            var filePath = Path.Combine(outputDir, $"{bandKey}.tif");
+            if (File.Exists(filePath) && new FileInfo(filePath).Length > 0)
+            {
+                Console.WriteLine($"{bandKey}: already downloaded.");
+                continue;
+            }
+
             if (!item.Assets.TryGetValue(bandKey, out var href))
             {
                 Console.WriteLine($"Asset {bandKey} missing on item {item.Id} (skipping).");
@@ -24,7 +31,6 @@ public sealed class BandDownloader
             }
 
             var signed = await _stacClient.SignHrefAsync(href);
-            var filePath = Path.Combine(outputDir, $"{bandKey}.tif");
             await DownloadFileWithRetryAsync(signed, filePath, bandKey);
         }
     }
