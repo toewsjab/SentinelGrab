@@ -265,6 +265,85 @@ WHERE JobProductId = @JobProductId;";
         return await reader.ReadAsync() ? ReadPipelineWaterRequest(reader) : null;
     }
 
+    public async Task InsertPipelineWaterBinObservationsAsync(
+        long pipelineWaterRunId,
+        IReadOnlyCollection<PipelineWaterBinObservation> observations)
+    {
+        if (observations.Count == 0)
+        {
+            return;
+        }
+
+        const string sql = @"
+INSERT INTO dbo.SentinelPipelineWaterBinObservations
+(
+    PipelineWaterRunId,
+    AcquisitionKey,
+    AcquiredAt,
+    BinIndex,
+    StartChainageM,
+    EndChainageM,
+    ObservationState,
+    ExposureType,
+    WaterAreaInCorridorM2,
+    LengthOnWaterM,
+    NearestWaterDistanceM,
+    RouteBinGeometry,
+    WaterIntersectionGeometry
+)
+VALUES
+(
+    @PipelineWaterRunId,
+    @AcquisitionKey,
+    @AcquiredAt,
+    @BinIndex,
+    @StartChainageM,
+    @EndChainageM,
+    @ObservationState,
+    @ExposureType,
+    @WaterAreaInCorridorM2,
+    @LengthOnWaterM,
+    @NearestWaterDistanceM,
+    geometry::STGeomFromText(@RouteBinGeometryWkt, 4326),
+    CASE
+        WHEN @WaterIntersectionGeometryWkt IS NULL THEN NULL
+        ELSE geometry::STGeomFromText(@WaterIntersectionGeometryWkt, 4326)
+    END
+);";
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        await using var transaction = (SqlTransaction)await conn.BeginTransactionAsync();
+
+        try
+        {
+            foreach (var observation in observations)
+            {
+                await using var cmd = new SqlCommand(sql, conn, transaction);
+                cmd.Parameters.Add("@PipelineWaterRunId", SqlDbType.BigInt).Value = pipelineWaterRunId;
+                cmd.Parameters.Add("@AcquisitionKey", SqlDbType.NVarChar, 200).Value = observation.AcquisitionKey;
+                cmd.Parameters.Add("@AcquiredAt", SqlDbType.DateTimeOffset).Value = observation.AcquiredAt;
+                cmd.Parameters.Add("@BinIndex", SqlDbType.Int).Value = observation.BinIndex;
+                cmd.Parameters.Add("@StartChainageM", SqlDbType.Decimal).Value = observation.StartChainageM;
+                cmd.Parameters.Add("@EndChainageM", SqlDbType.Decimal).Value = observation.EndChainageM;
+                cmd.Parameters.Add("@ObservationState", SqlDbType.VarChar, 12).Value = observation.ObservationState;
+                cmd.Parameters.Add("@ExposureType", SqlDbType.VarChar, 12).Value = (object?)observation.ExposureType ?? DBNull.Value;
+                cmd.Parameters.Add("@WaterAreaInCorridorM2", SqlDbType.Decimal).Value = (object?)observation.WaterAreaInCorridorM2 ?? DBNull.Value;
+                cmd.Parameters.Add("@LengthOnWaterM", SqlDbType.Decimal).Value = (object?)observation.LengthOnWaterM ?? DBNull.Value;
+                cmd.Parameters.Add("@NearestWaterDistanceM", SqlDbType.Decimal).Value = (object?)observation.NearestWaterDistanceM ?? DBNull.Value;
+                cmd.Parameters.Add("@RouteBinGeometryWkt", SqlDbType.NVarChar, -1).Value = observation.RouteBinWkt;
+                cmd.Parameters.Add("@WaterIntersectionGeometryWkt", SqlDbType.NVarChar, -1).Value = (object?)observation.WaterIntersectionWkt ?? DBNull.Value;
+                await cmd.ExecuteNonQueryAsync();
+            }
+
+            await transaction.CommitAsync();
+        }
+        catch
+        {
+            await transaction.RollbackAsync();
+            throw;
+        }
+    }
     public async Task DeactivatePipelinePathAsync(long pipelinePathId)
     {
         const string sql = @"
