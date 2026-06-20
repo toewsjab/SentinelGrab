@@ -113,6 +113,9 @@ public sealed class PipelineWaterConfig
     public string Method { get; set; } = "Sentinel2Water";
     public string AlgorithmVersion { get; set; } = "pipeline-water-s2-v1";
     public int MaximumConcurrentSections { get; set; } = 2;
+    public int MaximumAcquisitions { get; set; } = 100;
+    public long MaximumLocalDiskBytes { get; set; } = 2147483648L;
+    public long MaximumRasterPixels { get; set; } = 500000000L;
     public bool AllowBinLengthGreaterThanCorridorDiameter { get; set; } = false;
 
     public IReadOnlyList<int> IncludedMonths { get; private set; } = Array.Empty<int>();
@@ -156,6 +159,21 @@ public sealed class PipelineWaterConfig
         if (MaximumConcurrentSections < 1 || MaximumConcurrentSections > 16)
         {
             throw new InvalidOperationException("PipelineWater MaximumConcurrentSections must be between 1 and 16.");
+        }
+
+        if (MaximumAcquisitions <= 0)
+        {
+            throw new InvalidOperationException("PipelineWater MaximumAcquisitions must be greater than zero.");
+        }
+
+        if (MaximumLocalDiskBytes <= 0)
+        {
+            throw new InvalidOperationException("PipelineWater MaximumLocalDiskBytes must be greater than zero.");
+        }
+
+        if (MaximumRasterPixels <= 0)
+        {
+            throw new InvalidOperationException("PipelineWater MaximumRasterPixels must be greater than zero.");
         }
 
         IncludedMonths = ParseIncludedMonths();
