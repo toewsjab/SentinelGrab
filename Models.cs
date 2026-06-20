@@ -66,6 +66,46 @@ public sealed record SentinelPipelinePathRecord
     public DateTime? ModifiedAt { get; init; }
 }
 
+public sealed record PipelinePathImportRequest
+{
+    public string SourceText { get; init; } = "";
+    public string PathName { get; init; } = "";
+    public string? DirectionDescription { get; init; }
+    public string? SourceReference { get; init; }
+    public decimal ChainageOriginM { get; init; }
+    public double EndpointToleranceM { get; init; } = 0.5d;
+    public double DensifyMaxSegmentLengthM { get; init; } = 100d;
+    public double MaxProjectedSectionLengthM { get; init; } = 25000d;
+}
+
+public sealed record PipelinePathImportResult
+{
+    public SentinelPipelinePathRecord Path { get; init; } = new();
+    public IReadOnlyList<PipelinePathSectionRecord> Sections { get; init; } = Array.Empty<PipelinePathSectionRecord>();
+    public IReadOnlyList<PipelinePathEndpointGap> EndpointGaps { get; init; } = Array.Empty<PipelinePathEndpointGap>();
+    public double StartLongitude { get; init; }
+    public double StartLatitude { get; init; }
+    public double EndLongitude { get; init; }
+    public double EndLatitude { get; init; }
+    public IReadOnlyList<int> CrossedUtmZones { get; init; } = Array.Empty<int>();
+}
+
+public sealed record PipelinePathSectionRecord
+{
+    public int SectionOrdinal { get; init; }
+    public int UtmZone { get; init; }
+    public bool NorthernHemisphere { get; init; }
+    public decimal StartChainageM { get; init; }
+    public decimal EndChainageM { get; init; }
+    public string SectionGeometryWkt { get; init; } = "";
+}
+
+public sealed record PipelinePathEndpointGap
+{
+    public int FromComponentIndex { get; init; }
+    public int ToComponentIndex { get; init; }
+    public double GapMetres { get; init; }
+}
 public sealed record SentinelPipelineWaterRequestRecord
 {
     public long JobProductId { get; init; }

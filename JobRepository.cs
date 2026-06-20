@@ -1,4 +1,5 @@
 using Microsoft.Data.SqlClient;
+using System.Data;
 using System.Globalization;
 
 public sealed record JobSchema(bool HasModifiedAt, bool HasStartedAt, bool HasFinishedAt);
@@ -109,6 +110,150 @@ VALUES (@JobId, 'RGB', 'rgb', 'Queued');";
         };
     }
 
+    public async Task<SentinelPipelinePathRecord> InsertPipelinePathAsync(SentinelPipelinePathRecord path)
+    {
+        const string sql = @"
+INSERT INTO dbo.SentinelPipelinePaths
+(
+    PathName,
+    RouteGeometry,
+    RouteLengthM,
+    ChainageOriginM,
+    DirectionDescription,
+    SourceReference,
+    SourceHash,
+    IsActive
+)
+OUTPUT INSERTED.PipelinePathId
+VALUES
+(
+    @PathName,
+    geometry::STGeomFromText(@RouteGeometryWkt, 4326),
+    @RouteLengthM,
+    @ChainageOriginM,
+    @DirectionDescription,
+    @SourceReference,
+    @SourceHash,
+    @IsActive
+);";
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.Add("@PathName", SqlDbType.NVarChar, 200).Value = path.PathName;
+        cmd.Parameters.Add("@RouteGeometryWkt", SqlDbType.NVarChar, -1).Value = path.RouteGeometry;
+        cmd.Parameters.Add("@RouteLengthM", SqlDbType.Decimal).Value = path.RouteLengthM;
+        cmd.Parameters.Add("@ChainageOriginM", SqlDbType.Decimal).Value = path.ChainageOriginM;
+        cmd.Parameters.Add("@DirectionDescription", SqlDbType.NVarChar, 300).Value = (object?)path.DirectionDescription ?? DBNull.Value;
+        cmd.Parameters.Add("@SourceReference", SqlDbType.NVarChar, 300).Value = (object?)path.SourceReference ?? DBNull.Value;
+        cmd.Parameters.Add("@SourceHash", SqlDbType.Char, 64).Value = path.SourceHash;
+        cmd.Parameters.Add("@IsActive", SqlDbType.Bit).Value = path.IsActive;
+
+        var pipelinePathId = Convert.ToInt64(await cmd.ExecuteScalarAsync(), CultureInfo.InvariantCulture);
+        return path with { PipelinePathId = pipelinePathId };
+    }
+
+    public async Task<SentinelPipelinePathRecord?> GetPipelinePathAsync(long pipelinePathId)
+    {
+        const string sql = @"
+SELECT
+    PipelinePathId,
+    PathName,
+    RouteGeometry.STAsText() AS RouteGeometryWkt,
+    RouteLengthM,
+    ChainageOriginM,
+    DirectionDescription,
+    SourceReference,
+    SourceHash,
+    IsActive,
+    CreatedAt,
+    ModifiedAt
+FROM dbo.SentinelPipelinePaths
+WHERE PipelinePathId = @PipelinePathId;";
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.Add("@PipelinePathId", SqlDbType.BigInt).Value = pipelinePathId;
+
+        await using var reader = await cmd.ExecuteReaderAsync();
+        return await reader.ReadAsync() ? ReadPipelinePath(reader) : null;
+    }
+
+    public async Task<SentinelPipelinePathRecord?> GetPipelinePathBySourceHashAsync(string sourceHash)
+    {
+        const string sql = @"
+SELECT
+    PipelinePathId,
+    PathName,
+    RouteGeometry.STAsText() AS RouteGeometryWkt,
+    RouteLengthM,
+    ChainageOriginM,
+    DirectionDescription,
+    SourceReference,
+    SourceHash,
+    IsActive,
+    CreatedAt,
+    ModifiedAt
+FROM dbo.SentinelPipelinePaths
+WHERE SourceHash = @SourceHash;";
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.Add("@SourceHash", SqlDbType.Char, 64).Value = sourceHash;
+
+        await using var reader = await cmd.ExecuteReaderAsync();
+        return await reader.ReadAsync() ? ReadPipelinePath(reader) : null;
+    }
+
+    public async Task<IReadOnlyList<SentinelPipelinePathRecord>> GetActivePipelinePathsAsync()
+    {
+        const string sql = @"
+SELECT
+    PipelinePathId,
+    PathName,
+    RouteGeometry.STAsText() AS RouteGeometryWkt,
+    RouteLengthM,
+    ChainageOriginM,
+    DirectionDescription,
+    SourceReference,
+    SourceHash,
+    IsActive,
+    CreatedAt,
+    ModifiedAt
+FROM dbo.SentinelPipelinePaths
+WHERE IsActive = 1
+ORDER BY PathName, PipelinePathId;";
+
+        var paths = new List<SentinelPipelinePathRecord>();
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        await using var cmd = new SqlCommand(sql, conn);
+
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            paths.Add(ReadPipelinePath(reader));
+        }
+
+        return paths;
+    }
+
+    public async Task DeactivatePipelinePathAsync(long pipelinePathId)
+    {
+        const string sql = @"
+UPDATE dbo.SentinelPipelinePaths
+SET IsActive = 0,
+    ModifiedAt = SYSDATETIME()
+WHERE PipelinePathId = @PipelinePathId;";
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.Add("@PipelinePathId", SqlDbType.BigInt).Value = pipelinePathId;
+        await cmd.ExecuteNonQueryAsync();
+    }
     public async Task UpdateJobProductStatusAsync(long jobProductId, string status, string? lastError, string? lastLog)
     {
         const string sql = @"
@@ -300,6 +445,23 @@ WHERE JobId = @JobId;";
         return result is not null;
     }
 
+    private static SentinelPipelinePathRecord ReadPipelinePath(SqlDataReader reader)
+    {
+        return new SentinelPipelinePathRecord
+        {
+            PipelinePathId = reader.GetInt64(0),
+            PathName = reader.GetString(1),
+            RouteGeometry = reader.GetString(2),
+            RouteLengthM = reader.GetDecimal(3),
+            ChainageOriginM = reader.GetDecimal(4),
+            DirectionDescription = reader.IsDBNull(5) ? null : reader.GetString(5),
+            SourceReference = reader.IsDBNull(6) ? null : reader.GetString(6),
+            SourceHash = reader.GetString(7),
+            IsActive = reader.GetBoolean(8),
+            CreatedAt = reader.IsDBNull(9) ? null : reader.GetDateTime(9),
+            ModifiedAt = reader.IsDBNull(10) ? null : reader.GetDateTime(10)
+        };
+    }
     private static SentinelGrabJob ReadJob(SqlDataReader reader)
     {
         var ordinals = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);

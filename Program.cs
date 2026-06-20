@@ -6,6 +6,11 @@ var projectRoot = FindProjectRoot(Environment.CurrentDirectory)
     ?? Environment.CurrentDirectory;
 
 var config = AppConfig.Load(projectRoot);
+if (GetArgValue(args, "--import-pipeline") is { } pipelineImportPath)
+{
+    await RunPipelineImportAsync(config, projectRoot, args, pipelineImportPath);
+    return;
+}
 var mode = ResolveMode(args, config);
 
 Console.WriteLine($"SentinelGrab starting in '{mode}' mode.");
@@ -19,6 +24,59 @@ else
     await RunCliModeAsync(config, projectRoot, args);
 }
 
+static async Task RunPipelineImportAsync(AppConfig config, string projectRoot, string[] args, string pipelineImportPath)
+{
+    if (string.IsNullOrWhiteSpace(config.SqlConnectionString))
+    {
+        throw new InvalidOperationException("SqlConnectionString is required for --import-pipeline.");
+    }
+
+    var sourcePath = ResolveRootPath(pipelineImportPath, projectRoot);
+    var sourceText = await File.ReadAllTextAsync(sourcePath);
+    var chainageOriginM = GetDecimalArg(args, "--chainage-origin-m") ?? 0m;
+    var importRequest = new PipelinePathImportRequest
+    {
+        SourceText = sourceText,
+        PathName = GetArgValue(args, "--pipeline-name") ?? Path.GetFileNameWithoutExtension(sourcePath),
+        DirectionDescription = GetArgValue(args, "--direction-description"),
+        SourceReference = GetArgValue(args, "--source-reference") ?? sourcePath,
+        ChainageOriginM = chainageOriginM,
+        EndpointToleranceM = GetDoubleArg(args, "--endpoint-tolerance-m") ?? 0.5d,
+        DensifyMaxSegmentLengthM = GetDoubleArg(args, "--densify-max-segment-m") ?? 100d,
+        MaxProjectedSectionLengthM = GetDoubleArg(args, "--max-section-length-m") ?? 25000d
+    };
+
+    var importer = new PipelinePathImporter();
+    var result = importer.Import(importRequest);
+    var repo = new JobRepository(config.SqlConnectionString);
+    var existing = await repo.GetPipelinePathBySourceHashAsync(result.Path.SourceHash);
+    var path = existing ?? await repo.InsertPipelinePathAsync(result.Path);
+
+    Console.WriteLine(existing is null
+        ? $"Imported pipeline route {path.PipelinePathId}."
+        : $"Pipeline route already exists as {path.PipelinePathId}; import matched SourceHash.");
+    Console.WriteLine($"Route ID: {path.PipelinePathId}");
+    Console.WriteLine($"Total length m: {result.Path.RouteLengthM:0.###}");
+    Console.WriteLine($"Start: {result.StartLongitude.ToString("G17", CultureInfo.InvariantCulture)},{result.StartLatitude.ToString("G17", CultureInfo.InvariantCulture)}");
+    Console.WriteLine($"End: {result.EndLongitude.ToString("G17", CultureInfo.InvariantCulture)},{result.EndLatitude.ToString("G17", CultureInfo.InvariantCulture)}");
+    Console.WriteLine($"Section count: {result.Sections.Count}");
+    Console.WriteLine($"Crossed UTM zones: {string.Join(", ", result.CrossedUtmZones)}");
+    Console.WriteLine($"Source hash: {result.Path.SourceHash}");
+
+    if (result.EndpointGaps.Count == 0)
+    {
+        Console.WriteLine("Endpoint gaps: none");
+    }
+    else
+    {
+        Console.WriteLine("Endpoint gaps:");
+        foreach (var gap in result.EndpointGaps)
+        {
+            Console.WriteLine(
+                $"  component {gap.FromComponentIndex} -> {gap.ToComponentIndex}: {gap.GapMetres.ToString("0.###", CultureInfo.InvariantCulture)} m");
+        }
+    }
+}
 static async Task RunCliModeAsync(AppConfig config, string projectRoot, string[] args)
 {
     var bboxText = GetArgValue(args, "--bbox") ?? config.Cli.Bbox ?? "-103.86731513843112,50.5123611,-102.9133333,50.99259736981789";
@@ -430,6 +488,19 @@ static string? GetArgValue(string[] args, string name)
     return null;
 }
 
+static double? GetDoubleArg(string[] args, string name)
+{
+    return GetArgValue(args, name) is { } value && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
+        ? parsed
+        : null;
+}
+
+static decimal? GetDecimalArg(string[] args, string name)
+{
+    return GetArgValue(args, name) is { } value && decimal.TryParse(value, NumberStyles.Number, CultureInfo.InvariantCulture, out var parsed)
+        ? parsed
+        : null;
+}
 static HttpClient CreateHttpClient()
 {
     var http = new HttpClient(new HttpClientHandler

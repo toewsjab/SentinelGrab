@@ -1,8 +1,10 @@
-Microsoft Visual Studio Solution File, Format Version 12.00
+﻿Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.5.2.0
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SentinelGrab", "SentinelGrab.csproj", "{6987F57E-4288-380D-B619-B4D4D0826106}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SentinelGrab.Tests", "SentinelGrab.Tests\SentinelGrab.Tests.csproj", "{0D8E1208-6A1D-413C-8F75-A7751A0CC355}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -14,6 +16,10 @@ Global
 		{6987F57E-4288-380D-B619-B4D4D0826106}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{6987F57E-4288-380D-B619-B4D4D0826106}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{6987F57E-4288-380D-B619-B4D4D0826106}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0D8E1208-6A1D-413C-8F75-A7751A0CC355}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0D8E1208-6A1D-413C-8F75-A7751A0CC355}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0D8E1208-6A1D-413C-8F75-A7751A0CC355}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0D8E1208-6A1D-413C-8F75-A7751A0CC355}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
