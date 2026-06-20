@@ -12,6 +12,8 @@ public sealed class AppConfig
     public double DefaultNdviMax { get; set; } = 0.9;
     public int DefaultProcesses { get; set; } = 1;
     public CliConfig Cli { get; set; } = new();
+    public WaterDetectionConfig WaterDetection { get; set; } = new();
+    public PipelineWaterConfig PipelineWater { get; set; } = new();
 
     public static AppConfig Load(string basePath)
     {
@@ -29,6 +31,9 @@ public sealed class AppConfig
             config.SqlConnectionString = envConn;
         }
 
+        config.WaterDetection.Validate();
+        config.PipelineWater.Validate();
+
         return config;
     }
 }
@@ -39,4 +44,162 @@ public sealed class CliConfig
     public int Year { get; set; } = 2025;
     public int Month { get; set; } = 5;
     public int CloudCoverMax { get; set; } = 80;
+}
+
+public sealed class WaterDetectionConfig
+{
+    public string Method { get; set; } = "Scl";
+    public string AlgorithmVersion { get; set; } = "scl-v1";
+    public double MinAreaSquareMetres { get; set; } = 400d;
+    public int Connectivity { get; set; } = 8;
+    public double MinimumClearCoveragePercent { get; set; } = 95d;
+    public double NdwiThreshold { get; set; } = 0.10d;
+    public double MndwiThreshold { get; set; } = 0.00d;
+    public bool UseSclWaterSeed { get; set; } = true;
+    public bool KeepIntermediateFiles { get; set; } = false;
+
+    public void Validate()
+    {
+        if (!string.Equals(Method, "Scl", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(Method, "Hybrid", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("WaterDetection Method must be either 'Scl' or 'Hybrid'.");
+        }
+
+        if (!double.IsFinite(MinAreaSquareMetres) || MinAreaSquareMetres <= 0)
+        {
+            throw new InvalidOperationException("WaterDetection MinAreaSquareMetres must be greater than zero.");
+        }
+
+        if (Connectivity is not 4 and not 8)
+        {
+            throw new InvalidOperationException("WaterDetection Connectivity must be 4 or 8.");
+        }
+
+        ValidatePercent(MinimumClearCoveragePercent, nameof(MinimumClearCoveragePercent));
+
+        if (!double.IsFinite(NdwiThreshold))
+        {
+            throw new InvalidOperationException("WaterDetection NdwiThreshold must be a finite number.");
+        }
+
+        if (!double.IsFinite(MndwiThreshold))
+        {
+            throw new InvalidOperationException("WaterDetection MndwiThreshold must be a finite number.");
+        }
+    }
+
+    private static void ValidatePercent(double value, string name)
+    {
+        if (!double.IsFinite(value) || value < 0 || value > 100)
+        {
+            throw new InvalidOperationException($"WaterDetection {name} must be a finite value between 0 and 100.");
+        }
+    }
+}
+
+// Screening defaults only; not corrosion criteria or regulatory limits.
+public sealed class PipelineWaterConfig
+{
+    public double CorridorHalfWidthM { get; set; } = 50d;
+    public double AnalysisBinLengthM { get; set; } = 20d;
+    public double MaximumSectionLengthM { get; set; } = 25000d;
+    public int MinimumClearObservations { get; set; } = 5;
+    public double MinimumClearFractionPerBin { get; set; } = 0.80d;
+    public double PersistentFrequencyThreshold { get; set; } = 0.80d;
+    public double SeasonalFrequencyThreshold { get; set; } = 0.20d;
+    public string? IncludedMonthsCsv { get; set; } = "4,5,6,7,8,9,10";
+    public double MergeGapM { get; set; } = 20d;
+    public string Method { get; set; } = "Sentinel2Water";
+    public string AlgorithmVersion { get; set; } = "pipeline-water-s2-v1";
+    public int MaximumConcurrentSections { get; set; } = 2;
+    public bool AllowBinLengthGreaterThanCorridorDiameter { get; set; } = false;
+
+    public IReadOnlyList<int> IncludedMonths { get; private set; } = Array.Empty<int>();
+
+    public void Validate()
+    {
+        ValidatePositive(CorridorHalfWidthM, nameof(CorridorHalfWidthM));
+        ValidatePositive(AnalysisBinLengthM, nameof(AnalysisBinLengthM));
+        ValidatePositive(MaximumSectionLengthM, nameof(MaximumSectionLengthM));
+        ValidatePositive(MergeGapM, nameof(MergeGapM));
+
+        if (!AllowBinLengthGreaterThanCorridorDiameter && AnalysisBinLengthM > CorridorHalfWidthM * 2d)
+        {
+            throw new InvalidOperationException("PipelineWater AnalysisBinLengthM cannot be larger than twice CorridorHalfWidthM unless explicitly allowed.");
+        }
+
+        if (MinimumClearObservations <= 0)
+        {
+            throw new InvalidOperationException("PipelineWater MinimumClearObservations must be greater than zero.");
+        }
+
+        ValidateUnitInterval(MinimumClearFractionPerBin, nameof(MinimumClearFractionPerBin));
+        ValidateUnitInterval(PersistentFrequencyThreshold, nameof(PersistentFrequencyThreshold));
+        ValidateUnitInterval(SeasonalFrequencyThreshold, nameof(SeasonalFrequencyThreshold));
+
+        if (PersistentFrequencyThreshold <= SeasonalFrequencyThreshold)
+        {
+            throw new InvalidOperationException("PipelineWater PersistentFrequencyThreshold must be greater than SeasonalFrequencyThreshold.");
+        }
+
+        if (string.IsNullOrWhiteSpace(Method))
+        {
+            throw new InvalidOperationException("PipelineWater Method is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(AlgorithmVersion))
+        {
+            throw new InvalidOperationException("PipelineWater AlgorithmVersion is required.");
+        }
+
+        if (MaximumConcurrentSections < 1 || MaximumConcurrentSections > 16)
+        {
+            throw new InvalidOperationException("PipelineWater MaximumConcurrentSections must be between 1 and 16.");
+        }
+
+        IncludedMonths = ParseIncludedMonths();
+    }
+
+    private IReadOnlyList<int> ParseIncludedMonths()
+    {
+        if (string.IsNullOrWhiteSpace(IncludedMonthsCsv))
+        {
+            return Array.Empty<int>();
+        }
+
+        var months = new List<int>();
+        foreach (var part in IncludedMonthsCsv.Split(',', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (!int.TryParse(part, out var month) || month < 1 || month > 12)
+            {
+                throw new InvalidOperationException("PipelineWater IncludedMonthsCsv must contain only month numbers 1 through 12.");
+            }
+
+            if (months.Contains(month))
+            {
+                throw new InvalidOperationException("PipelineWater IncludedMonthsCsv cannot contain duplicate months.");
+            }
+
+            months.Add(month);
+        }
+
+        return months;
+    }
+
+    private static void ValidatePositive(double value, string name)
+    {
+        if (!double.IsFinite(value) || value <= 0d)
+        {
+            throw new InvalidOperationException($"PipelineWater {name} must be a finite value greater than zero.");
+        }
+    }
+
+    private static void ValidateUnitInterval(double value, string name)
+    {
+        if (!double.IsFinite(value) || value < 0d || value > 1d)
+        {
+            throw new InvalidOperationException($"PipelineWater {name} must be a finite value between 0 and 1.");
+        }
+    }
 }

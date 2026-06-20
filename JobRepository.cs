@@ -240,6 +240,31 @@ ORDER BY PathName, PipelinePathId;";
         return paths;
     }
 
+    public async Task<SentinelPipelineWaterRequestRecord?> GetPipelineWaterRequestAsync(long jobProductId)
+    {
+        const string sql = @"
+SELECT
+    JobProductId,
+    PipelinePathId,
+    CorridorHalfWidthM,
+    AnalysisBinLengthM,
+    MinimumClearObservations,
+    PersistentFrequencyThreshold,
+    SeasonalFrequencyThreshold,
+    IncludedMonthsCsv,
+    CreatedAt
+FROM dbo.SentinelPipelineWaterRequests
+WHERE JobProductId = @JobProductId;";
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.Add("@JobProductId", SqlDbType.BigInt).Value = jobProductId;
+
+        await using var reader = await cmd.ExecuteReaderAsync();
+        return await reader.ReadAsync() ? ReadPipelineWaterRequest(reader) : null;
+    }
+
     public async Task DeactivatePipelinePathAsync(long pipelinePathId)
     {
         const string sql = @"
@@ -462,6 +487,22 @@ WHERE JobId = @JobId;";
             ModifiedAt = reader.IsDBNull(10) ? null : reader.GetDateTime(10)
         };
     }
+    private static SentinelPipelineWaterRequestRecord ReadPipelineWaterRequest(SqlDataReader reader)
+    {
+        return new SentinelPipelineWaterRequestRecord
+        {
+            JobProductId = reader.GetInt64(0),
+            PipelinePathId = reader.GetInt64(1),
+            CorridorHalfWidthM = reader.GetDecimal(2),
+            AnalysisBinLengthM = reader.GetDecimal(3),
+            MinimumClearObservations = reader.GetInt32(4),
+            PersistentFrequencyThreshold = reader.GetDecimal(5),
+            SeasonalFrequencyThreshold = reader.GetDecimal(6),
+            IncludedMonthsCsv = reader.IsDBNull(7) ? null : reader.GetString(7),
+            CreatedAt = reader.IsDBNull(8) ? null : reader.GetDateTime(8)
+        };
+    }
+
     private static SentinelGrabJob ReadJob(SqlDataReader reader)
     {
         var ordinals = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);

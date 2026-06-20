@@ -212,7 +212,7 @@ static async Task ProcessJobAsync(SentinelGrabJob job, JobRepository repo, AppCo
         Console.WriteLine("PreferMosaic=1 but MaxScenes < 2; only one scene will be downloaded.");
     }
 
-    var bandSet = ComputeRequiredBands(products);
+    var bandSet = ComputeRequiredBands(products, config.WaterDetection);
     bandSet.Add("SCL");
 
     using var http = CreateHttpClient();
@@ -363,7 +363,7 @@ static async Task ProcessJobAsync(SentinelGrabJob job, JobRepository repo, AppCo
     }
 }
 
-static HashSet<string> ComputeRequiredBands(IEnumerable<SentinelGrabJobProduct> products)
+static HashSet<string> ComputeRequiredBands(IEnumerable<SentinelGrabJobProduct> products, WaterDetectionConfig waterDetection)
 {
     var bands = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -389,10 +389,25 @@ static HashSet<string> ComputeRequiredBands(IEnumerable<SentinelGrabJobProduct> 
                 bands.Add("B8A");
                 bands.Add("B05");
                 break;
+            case SentinelGrabProductCodes.PipelineWater:
+                AddWaterDetectorBands(bands, waterDetection);
+                break;
         }
     }
 
     return bands;
+}
+
+static void AddWaterDetectorBands(HashSet<string> bands, WaterDetectionConfig waterDetection)
+{
+    bands.Add("SCL");
+
+    if (string.Equals(waterDetection.Method, "Hybrid", StringComparison.OrdinalIgnoreCase))
+    {
+        bands.Add("B03");
+        bands.Add("B08");
+        bands.Add("B11");
+    }
 }
 
 static (DateTime From, DateTime To, string DateKey) ResolveDateRange(SentinelGrabJob job)

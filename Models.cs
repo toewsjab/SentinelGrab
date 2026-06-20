@@ -119,6 +119,102 @@ public sealed record SentinelPipelineWaterRequestRecord
     public DateTime? CreatedAt { get; init; }
 }
 
+public sealed record PipelineWaterBuildRequest
+{
+    public long JobId { get; init; }
+    public long JobProductId { get; init; }
+    public SentinelPipelinePathRecord PipelinePath { get; init; } = new();
+    public SentinelPipelineWaterRequestRecord Request { get; init; } = new();
+    public DateTime DateFrom { get; init; }
+    public DateTime DateTo { get; init; }
+    public string WorkRoot { get; init; } = "";
+    public string OutputRootPath { get; init; } = "";
+    public string OsgeoRoot { get; init; } = "";
+    public PipelineWaterConfig PipelineWater { get; init; } = new();
+    public WaterDetectionConfig WaterDetection { get; init; } = new();
+    public IReadOnlyList<PipelineSection> Sections { get; init; } = Array.Empty<PipelineSection>();
+}
+
+public sealed record PipelineSection
+{
+    public int SectionOrdinal { get; init; }
+    public int UtmZone { get; init; }
+    public bool NorthernHemisphere { get; init; }
+    public decimal StartChainageM { get; init; }
+    public decimal EndChainageM { get; init; }
+    public string RouteSectionWkt { get; init; } = "";
+}
+
+public sealed record PipelineChainageBin
+{
+    public int BinIndex { get; init; }
+    public int SectionOrdinal { get; init; }
+    public decimal StartChainageM { get; init; }
+    public decimal EndChainageM { get; init; }
+    public string RouteBinWkt { get; init; } = "";
+}
+
+public sealed record PipelineWaterAcquisitionResult
+{
+    public string AcquisitionKey { get; init; } = "";
+    public DateTimeOffset AcquiredAt { get; init; }
+    public bool IsClear { get; init; }
+    public double ClearFraction { get; init; }
+    public string? WaterGeoJsonPath { get; init; }
+    public IReadOnlyList<PipelineWaterBinObservation> BinObservations { get; init; } = Array.Empty<PipelineWaterBinObservation>();
+}
+
+public sealed record PipelineWaterBinObservation
+{
+    public string AcquisitionKey { get; init; } = "";
+    public DateTimeOffset AcquiredAt { get; init; }
+    public int BinIndex { get; init; }
+    public decimal StartChainageM { get; init; }
+    public decimal EndChainageM { get; init; }
+    public string ObservationState { get; init; } = "";
+    public string? ExposureType { get; init; }
+    public decimal? WaterAreaInCorridorM2 { get; init; }
+    public decimal? LengthOnWaterM { get; init; }
+    public decimal? NearestWaterDistanceM { get; init; }
+    public string RouteBinWkt { get; init; } = "";
+    public string? WaterIntersectionWkt { get; init; }
+}
+
+public sealed record PipelineWaterZoneResult
+{
+    public int ZoneOrdinal { get; init; }
+    public decimal StartChainageM { get; init; }
+    public decimal EndChainageM { get; init; }
+    public decimal LengthM { get; init; }
+    public int WaterObservationCount { get; init; }
+    public int DryObservationCount { get; init; }
+    public int UnknownObservationCount { get; init; }
+    public int ClearObservationCount { get; init; }
+    public decimal? WaterFrequency { get; init; }
+    public string PersistenceClass { get; init; } = "";
+    public DateTimeOffset? FirstWaterObservedAt { get; init; }
+    public DateTimeOffset? LastWaterObservedAt { get; init; }
+    public decimal? MaximumWaterAreaM2 { get; init; }
+    public decimal? MinimumWaterDistanceM { get; init; }
+    public string RouteZoneWkt { get; init; } = "";
+}
+
+public sealed record PipelineWaterBuildResult
+{
+    public long JobId { get; init; }
+    public long JobProductId { get; init; }
+    public long PipelinePathId { get; init; }
+    public string Method { get; init; } = "";
+    public string AlgorithmVersion { get; init; } = "";
+    public int AcquisitionCount { get; init; }
+    public int ClearAcquisitionCount { get; init; }
+    public string OutputDirectory { get; init; } = "";
+    public string? ObservationsGeoJsonPath { get; init; }
+    public string? ZonesGeoJsonPath { get; init; }
+    public IReadOnlyList<PipelineWaterAcquisitionResult> Acquisitions { get; init; } = Array.Empty<PipelineWaterAcquisitionResult>();
+    public IReadOnlyList<PipelineWaterZoneResult> Zones { get; init; } = Array.Empty<PipelineWaterZoneResult>();
+    public string ProcessingLog { get; init; } = "";
+}
 public sealed record SentinelPipelineWaterRunRecord
 {
     public long PipelineWaterRunId { get; init; }
