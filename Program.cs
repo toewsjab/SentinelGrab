@@ -6,6 +6,12 @@ var projectRoot = FindProjectRoot(Environment.CurrentDirectory)
     ?? Environment.CurrentDirectory;
 
 var config = AppConfig.Load(projectRoot);
+
+if (PipelineWaterExportCli.IsExportCommand(args))
+{
+    await PipelineWaterExportCli.RunAsync(config, projectRoot, args);
+    return;
+}
 if (GetArgValue(args, "--import-pipeline") is { } pipelineImportPath)
 {
     await RunPipelineImportAsync(config, projectRoot, args, pipelineImportPath);
