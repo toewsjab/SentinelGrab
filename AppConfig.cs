@@ -23,7 +23,7 @@ public sealed class AppConfig
         var configRoot = builder.Build();
         var config = configRoot.Get<AppConfig>() ?? new AppConfig();
 
-        var envConn = configRoot["JTFConn"];
+        var envConn = configRoot["FarmTrackerConn"];
         if (!string.IsNullOrWhiteSpace(envConn))
         {
             config.SqlConnectionString = envConn;
