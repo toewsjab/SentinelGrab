@@ -95,6 +95,7 @@ static async Task RunCliModeAsync(AppConfig config, string projectRoot, string[]
         ZoomMin = 8,
         ZoomMax = 16,
         OsgeoRoot = config.OsgeoRoot,
+        ClipBbox = bbox,
         Processes = Math.Max(1, config.DefaultProcesses),
         ScaleMaxRgb = config.DefaultScaleMaxRGB
     });
@@ -249,6 +250,7 @@ static async Task ProcessJobAsync(SentinelGrabJob job, JobRepository repo, AppCo
                 ZoomMin = zoomMin,
                 ZoomMax = zoomMax,
                 OsgeoRoot = config.OsgeoRoot,
+                ClipBbox = bbox,
                 Processes = processes,
                 ScaleMaxRgb = config.DefaultScaleMaxRGB,
                 IndexMin = config.DefaultNdviMin,

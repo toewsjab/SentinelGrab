@@ -14,6 +14,7 @@ public sealed record TileBuildRequest
     public string OutputRootPath { get; init; } = "";
     public string ProductSubPath { get; init; } = "";
     public string OsgeoRoot { get; init; } = "";
+    public Bbox? ClipBbox { get; init; }
     public int ZoomMin { get; init; } = 8;
     public int ZoomMax { get; init; } = 14;
     public int Processes { get; init; } = 1;
@@ -41,6 +42,13 @@ public sealed class GdalProductTileBuilder
         var log = new StringBuilder();
         log.AppendLine($"Building {productCode} tiles for JobId={request.JobId}.");
         log.AppendLine($"OutputDir={outputDir}");
+        if (request.ClipBbox is { } clipBbox)
+        {
+            log.AppendLine(
+                string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"ClipBbox={clipBbox.MinLon},{clipBbox.MinLat},{clipBbox.MaxLon},{clipBbox.MaxLat}"));
+        }
 
         switch (productCode)
         {
@@ -68,59 +76,55 @@ public sealed class GdalProductTileBuilder
         var workDir = Path.Combine(request.InputDir, "_work", "rgb");
         Directory.CreateDirectory(workDir);
 
-        await BuildBandVrtAsync(gdal, workDir, request.InputDir, "B02", log);
-        await BuildBandVrtAsync(gdal, workDir, request.InputDir, "B03", log);
-        await BuildBandVrtAsync(gdal, workDir, request.InputDir, "B04", log);
+        try
+        {
+            await BuildBandVrtAsync(gdal, workDir, request.InputDir, "B02", log);
+            await BuildBandVrtAsync(gdal, workDir, request.InputDir, "B03", log);
+            await BuildBandVrtAsync(gdal, workDir, request.InputDir, "B04", log);
 
-        await gdal.RunCheckedAsync(
-            "gdalbuildvrt",
-            new[] { "-overwrite", "-separate", "rgb.vrt", "B04.vrt", "B03.vrt", "B02.vrt" },
-            workDir,
-            log);
+            await gdal.RunCheckedAsync(
+                "gdalbuildvrt",
+                new[] { "-overwrite", "-separate", "rgb.vrt", "B04.vrt", "B03.vrt", "B02.vrt" },
+                workDir,
+                log);
 
-        await gdal.RunCheckedAsync(
-            "gdalwarp",
-            new[]
-            {
-                "-overwrite",
-                "-t_srs", "EPSG:3857",
-                "-r", "bilinear",
-                "-multi",
-                "-wo", "NUM_THREADS=ALL_CPUS",
-                "rgb.vrt",
-                "rgb_3857.tif",
-                "-co", "TILED=YES",
-                "-co", "COMPRESS=DEFLATE"
-            },
-            workDir,
-            log);
+            await gdal.RunCheckedAsync(
+                "gdalwarp",
+                BuildWarpToWebMercatorArgs(request, "rgb.vrt", "rgb_3857.tif"),
+                workDir,
+                log);
 
-        await gdal.RunCheckedAsync(
-            "gdal_translate",
-            new[]
-            {
-                "-of", "GTiff",
-                "rgb_3857.tif",
-                "rgb_3857_8bit.tif",
-                "-ot", "Byte",
-                "-scale_1", "0", request.ScaleMaxRgb.ToString(CultureInfo.InvariantCulture), "0", "255",
-                "-scale_2", "0", request.ScaleMaxRgb.ToString(CultureInfo.InvariantCulture), "0", "255",
-                "-scale_3", "0", request.ScaleMaxRgb.ToString(CultureInfo.InvariantCulture), "0", "255",
-                "-co", "TILED=YES",
-                "-co", "COMPRESS=DEFLATE"
-            },
-            workDir,
-            log);
+            await gdal.RunCheckedAsync(
+                "gdal_translate",
+                new[]
+                {
+                    "-of", "GTiff",
+                    "rgb_3857.tif",
+                    "rgb_3857_8bit.tif",
+                    "-ot", "Byte",
+                    "-scale_1", "0", request.ScaleMaxRgb.ToString(CultureInfo.InvariantCulture), "0", "255",
+                    "-scale_2", "0", request.ScaleMaxRgb.ToString(CultureInfo.InvariantCulture), "0", "255",
+                    "-scale_3", "0", request.ScaleMaxRgb.ToString(CultureInfo.InvariantCulture), "0", "255",
+                    "-co", "TILED=YES",
+                    "-co", "COMPRESS=DEFLATE"
+                },
+                workDir,
+                log);
 
-        var tileGenerator = new GdalXyzTileGenerator();
-        await tileGenerator.GenerateAsync(
-            Path.Combine(workDir, "rgb_3857_8bit.tif"),
-            outputDir,
-            request.ZoomMin,
-            request.ZoomMax,
-            request.Processes,
-            gdal,
-            log);
+            var tileGenerator = new GdalXyzTileGenerator();
+            await tileGenerator.GenerateAsync(
+                Path.Combine(workDir, "rgb_3857_8bit.tif"),
+                outputDir,
+                request.ZoomMin,
+                request.ZoomMax,
+                request.Processes,
+                gdal,
+                log);
+        }
+        finally
+        {
+            TryDeleteDirectory(workDir, log);
+        }
     }
 
     private static async Task BuildIndexAsync(
@@ -135,89 +139,120 @@ public sealed class GdalProductTileBuilder
         var workDir = Path.Combine(request.InputDir, "_work", productName);
         Directory.CreateDirectory(workDir);
 
-        await BuildBandVrtAsync(gdal, workDir, request.InputDir, numeratorBand, log);
-        await BuildBandVrtAsync(gdal, workDir, request.InputDir, denominatorBand, log);
+        try
+        {
+            await BuildBandVrtAsync(gdal, workDir, request.InputDir, numeratorBand, log);
+            await BuildBandVrtAsync(gdal, workDir, request.InputDir, denominatorBand, log);
 
-        await gdal.RunCheckedAsync(
-            "gdalbuildvrt",
-            new[] { "-overwrite", "-separate", "idx.vrt", $"{numeratorBand}.vrt", $"{denominatorBand}.vrt" },
-            workDir,
-            log);
+            await gdal.RunCheckedAsync(
+                "gdalbuildvrt",
+                new[] { "-overwrite", "-separate", "idx.vrt", $"{numeratorBand}.vrt", $"{denominatorBand}.vrt" },
+                workDir,
+                log);
 
-        await gdal.RunCheckedAsync(
-            "gdalwarp",
-            new[]
+            await gdal.RunCheckedAsync(
+                "gdalwarp",
+                BuildWarpToWebMercatorArgs(request, "idx.vrt", "idx_3857.tif"),
+                workDir,
+                log);
+
+            var sourceInfo = await RasterInfo.ReadAsync(gdal, Path.Combine(workDir, "idx_3857.tif"), workDir);
+            var bandAPath = Path.Combine(workDir, "band_a_f32.bin");
+            var bandBPath = Path.Combine(workDir, "band_b_f32.bin");
+            var outputRawPath = Path.Combine(workDir, $"{productName}_8bit.raw");
+            var outputVrtPath = Path.Combine(workDir, $"{productName}_8bit.vrt");
+            var outputTifPath = Path.Combine(workDir, $"{productName}_8bit.tif");
+
+            DeleteIfExists(bandAPath, Path.ChangeExtension(bandAPath, ".hdr"));
+            DeleteIfExists(bandBPath, Path.ChangeExtension(bandBPath, ".hdr"));
+            DeleteIfExists(outputRawPath, outputVrtPath, outputTifPath);
+
+            await gdal.RunCheckedAsync(
+                "gdal_translate",
+                new[] { "-of", "ENVI", "-ot", "Float32", "-b", "1", "idx_3857.tif", Path.GetFileName(bandAPath) },
+                workDir,
+                log);
+
+            await gdal.RunCheckedAsync(
+                "gdal_translate",
+                new[] { "-of", "ENVI", "-ot", "Float32", "-b", "2", "idx_3857.tif", Path.GetFileName(bandBPath) },
+                workDir,
+                log);
+
+            ComputeScaledIndexRaster(
+                bandAPath,
+                bandBPath,
+                outputRawPath,
+                sourceInfo.Width,
+                sourceInfo.Height,
+                request.IndexMin,
+                request.IndexMax);
+
+            await WriteRawByteVrtAsync(outputVrtPath, outputRawPath, sourceInfo);
+
+            await gdal.RunCheckedAsync(
+                "gdal_translate",
+                new[]
+                {
+                    "-of", "GTiff",
+                    "-a_nodata", "0",
+                    Path.GetFileName(outputVrtPath),
+                    Path.GetFileName(outputTifPath),
+                    "-co", "TILED=YES",
+                    "-co", "COMPRESS=DEFLATE"
+                },
+                workDir,
+                log);
+
+            var tileGenerator = new GdalXyzTileGenerator();
+            await tileGenerator.GenerateAsync(
+                outputTifPath,
+                outputDir,
+                request.ZoomMin,
+                request.ZoomMax,
+                request.Processes,
+                gdal,
+                log);
+        }
+        finally
+        {
+            TryDeleteDirectory(workDir, log);
+        }
+    }
+
+    private static IReadOnlyList<string> BuildWarpToWebMercatorArgs(TileBuildRequest request, string source, string destination)
+    {
+        var args = new List<string>
+        {
+            "-overwrite",
+            "-t_srs", "EPSG:3857",
+            "-r", "bilinear",
+            "-multi",
+            "-wo", "NUM_THREADS=ALL_CPUS"
+        };
+
+        if (request.ClipBbox is { } bbox)
+        {
+            args.AddRange(new[]
             {
-                "-overwrite",
-                "-t_srs", "EPSG:3857",
-                "-r", "bilinear",
-                "-multi",
-                "-wo", "NUM_THREADS=ALL_CPUS",
-                "idx.vrt",
-                "idx_3857.tif",
-                "-co", "TILED=YES",
-                "-co", "COMPRESS=DEFLATE"
-            },
-            workDir,
-            log);
+                "-te_srs", "EPSG:4326",
+                "-te",
+                bbox.MinLon.ToString("G17", CultureInfo.InvariantCulture),
+                bbox.MinLat.ToString("G17", CultureInfo.InvariantCulture),
+                bbox.MaxLon.ToString("G17", CultureInfo.InvariantCulture),
+                bbox.MaxLat.ToString("G17", CultureInfo.InvariantCulture)
+            });
+        }
 
-        var sourceInfo = await RasterInfo.ReadAsync(gdal, Path.Combine(workDir, "idx_3857.tif"), workDir);
-        var bandAPath = Path.Combine(workDir, "band_a_f32.bin");
-        var bandBPath = Path.Combine(workDir, "band_b_f32.bin");
-        var outputRawPath = Path.Combine(workDir, $"{productName}_8bit.raw");
-        var outputVrtPath = Path.Combine(workDir, $"{productName}_8bit.vrt");
-        var outputTifPath = Path.Combine(workDir, $"{productName}_8bit.tif");
+        args.AddRange(new[]
+        {
+            source,
+            destination,
+            "-co", "TILED=YES",
+            "-co", "COMPRESS=DEFLATE"
+        });
 
-        DeleteIfExists(bandAPath, Path.ChangeExtension(bandAPath, ".hdr"));
-        DeleteIfExists(bandBPath, Path.ChangeExtension(bandBPath, ".hdr"));
-        DeleteIfExists(outputRawPath, outputVrtPath, outputTifPath);
-
-        await gdal.RunCheckedAsync(
-            "gdal_translate",
-            new[] { "-of", "ENVI", "-ot", "Float32", "-b", "1", "idx_3857.tif", Path.GetFileName(bandAPath) },
-            workDir,
-            log);
-
-        await gdal.RunCheckedAsync(
-            "gdal_translate",
-            new[] { "-of", "ENVI", "-ot", "Float32", "-b", "2", "idx_3857.tif", Path.GetFileName(bandBPath) },
-            workDir,
-            log);
-
-        ComputeScaledIndexRaster(
-            bandAPath,
-            bandBPath,
-            outputRawPath,
-            sourceInfo.Width,
-            sourceInfo.Height,
-            request.IndexMin,
-            request.IndexMax);
-
-        await WriteRawByteVrtAsync(outputVrtPath, outputRawPath, sourceInfo);
-
-        await gdal.RunCheckedAsync(
-            "gdal_translate",
-            new[]
-            {
-                "-of", "GTiff",
-                "-a_nodata", "0",
-                Path.GetFileName(outputVrtPath),
-                Path.GetFileName(outputTifPath),
-                "-co", "TILED=YES",
-                "-co", "COMPRESS=DEFLATE"
-            },
-            workDir,
-            log);
-
-        var tileGenerator = new GdalXyzTileGenerator();
-        await tileGenerator.GenerateAsync(
-            outputTifPath,
-            outputDir,
-            request.ZoomMin,
-            request.ZoomMax,
-            request.Processes,
-            gdal,
-            log);
+        return args;
     }
 
     private static async Task BuildBandVrtAsync(
@@ -348,6 +383,22 @@ public sealed class GdalProductTileBuilder
             {
                 File.Delete(path);
             }
+        }
+    }
+
+    private static void TryDeleteDirectory(string path, StringBuilder log)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, recursive: true);
+                log.AppendLine($"Deleted scratch folder: {path}");
+            }
+        }
+        catch (Exception ex)
+        {
+            log.AppendLine($"Unable to delete scratch folder {path}: {ex.Message}");
         }
     }
 }
