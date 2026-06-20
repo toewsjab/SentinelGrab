@@ -79,6 +79,12 @@ static async Task RunPipelineImportAsync(AppConfig config, string projectRoot, s
 }
 static async Task RunCliModeAsync(AppConfig config, string projectRoot, string[] args)
 {
+    if (PipelineWaterOperations.IsPipelineWaterProduct(GetArgValue(args, "--product")))
+    {
+        await PipelineWaterOperations.RunCliModeAsync(config, projectRoot, args);
+        return;
+    }
+
     var bboxText = GetArgValue(args, "--bbox") ?? config.Cli.Bbox ?? "-103.86731513843112,50.5123611,-102.9133333,50.99259736981789";
     var bbox = ParseBbox(bboxText);
 
@@ -202,6 +208,59 @@ static async Task ProcessJobAsync(SentinelGrabJob job, JobRepository repo, AppCo
     }
 
     var (dateFrom, dateTo, dateKey) = ResolveDateRange(job);
+    var pipelineProducts = products
+        .Where(product => PipelineWaterOperations.IsPipelineWaterProduct(product.ProductCode))
+        .ToList();
+    var rasterProducts = products
+        .Where(product => !PipelineWaterOperations.IsPipelineWaterProduct(product.ProductCode))
+        .ToList();
+
+    if (rasterProducts.Count == 0)
+    {
+        var pipelineWorkRoot = ResolveRootPath(config.WorkRoot ?? "data", projectRoot);
+        var pipelineJobRoot = Path.Combine(pipelineWorkRoot, job.JobId.ToString(CultureInfo.InvariantCulture));
+        Directory.CreateDirectory(pipelineJobRoot);
+
+        using var pipelineHttp = CreateHttpClient();
+        var pipelineStac = new StacClient(pipelineHttp);
+        var pipelineCloudMax = job.CloudCoverMax ?? 100;
+        foreach (var product in pipelineProducts)
+        {
+            await PipelineWaterOperations.ProcessDbProductAsync(
+                job,
+                product,
+                repo,
+                config,
+                projectRoot,
+                pipelineStac,
+                dateFrom,
+                dateTo,
+                pipelineJobRoot,
+                pipelineCloudMax);
+        }
+
+        var pipelineCounts = await repo.GetJobProductStatusCountsAsync(job.JobId);
+        if (pipelineCounts.Total == 0)
+        {
+            await repo.MarkJobFailedAsync(job.JobId);
+            Console.WriteLine("No products found to evaluate job status.");
+            return;
+        }
+
+        if (pipelineCounts.Failed == 0 && pipelineCounts.Succeeded == pipelineCounts.Total)
+        {
+            await repo.MarkJobSucceededAsync(job.JobId);
+            Console.WriteLine($"Job {job.JobId} succeeded.");
+        }
+        else
+        {
+            await repo.MarkJobFailedAsync(job.JobId);
+            Console.WriteLine($"Job {job.JobId} failed. Succeeded={pipelineCounts.Succeeded}, Failed={pipelineCounts.Failed}, Total={pipelineCounts.Total}.");
+        }
+
+        return;
+    }
+
     var bbox = ResolveBbox(job);
 
     var cloudMax = job.CloudCoverMax ?? 100;
@@ -212,7 +271,7 @@ static async Task ProcessJobAsync(SentinelGrabJob job, JobRepository repo, AppCo
         Console.WriteLine("PreferMosaic=1 but MaxScenes < 2; only one scene will be downloaded.");
     }
 
-    var bandSet = ComputeRequiredBands(products, config.WaterDetection);
+    var bandSet = ComputeRequiredBands(rasterProducts, config.WaterDetection);
     bandSet.Add("SCL");
 
     using var http = CreateHttpClient();
@@ -282,7 +341,7 @@ static async Task ProcessJobAsync(SentinelGrabJob job, JobRepository repo, AppCo
     var outputRootPath = ResolveRootPath(outputRoot, projectRoot);
     var tileBuilder = new GdalProductTileBuilder();
 
-    foreach (var product in products)
+    foreach (var product in rasterProducts)
     {
         var productCode = product.ProductCode.Trim().ToUpperInvariant();
         var productSubPath = string.IsNullOrWhiteSpace(product.OutputSubPath)
@@ -341,6 +400,21 @@ static async Task ProcessJobAsync(SentinelGrabJob job, JobRepository repo, AppCo
         {
             await repo.UpdateJobProductStatusAsync(product.JobProductId, "Failed", Truncate(ex.Message), Truncate(ex.ToString()));
         }
+    }
+
+    foreach (var product in pipelineProducts)
+    {
+        await PipelineWaterOperations.ProcessDbProductAsync(
+            job,
+            product,
+            repo,
+            config,
+            projectRoot,
+            stac,
+            dateFrom,
+            dateTo,
+            jobRoot,
+            cloudMax);
     }
 
     var counts = await repo.GetJobProductStatusCountsAsync(job.JobId);
