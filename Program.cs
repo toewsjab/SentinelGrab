@@ -12,11 +12,13 @@ if (PipelineWaterExportCli.IsExportCommand(args))
     await PipelineWaterExportCli.RunAsync(config, projectRoot, args);
     return;
 }
+
 if (GetArgValue(args, "--import-pipeline") is { } pipelineImportPath)
 {
     await RunPipelineImportAsync(config, projectRoot, args, pipelineImportPath);
     return;
 }
+
 var mode = ResolveMode(args, config);
 
 Console.WriteLine($"SentinelGrab starting in '{mode}' mode.");
@@ -24,6 +26,14 @@ Console.WriteLine($"SentinelGrab starting in '{mode}' mode.");
 if (string.Equals(mode, "db", StringComparison.OrdinalIgnoreCase))
 {
     await RunDbModeAsync(config, projectRoot);
+}
+else if (string.Equals(mode, "daily", StringComparison.OrdinalIgnoreCase))
+{
+    await RunDailyModeAsync(config, projectRoot, args);
+}
+else if (string.Equals(mode, "range", StringComparison.OrdinalIgnoreCase))
+{
+    await RunRangeModeAsync(config, projectRoot, args);
 }
 else
 {
@@ -83,6 +93,215 @@ static async Task RunPipelineImportAsync(AppConfig config, string projectRoot, s
         }
     }
 }
+
+static async Task RunDailyModeAsync(AppConfig config, string projectRoot, string[] args)
+{
+    ValidateAutomaticModeConfig(config, "daily");
+    var bbox = ResolveConfiguredBbox(config, args);
+    var lookbackDays = GetIntArg(args, "--lookback") ?? config.DailyCheck.LookbackDays;
+    var lagDays = GetIntArg(args, "--lag") ?? config.DailyCheck.LagDays;
+    if (lookbackDays <= 0)
+    {
+        throw new InvalidOperationException("DailyCheck LookbackDays must be greater than zero.");
+    }
+
+    if (lagDays < 0)
+    {
+        throw new InvalidOperationException("DailyCheck LagDays cannot be negative.");
+    }
+
+    var productCodes = ResolveProductCodes(GetArgValue(args, "--products"), config.DailyCheck.ProductCodes);
+    if (productCodes.Count == 0)
+    {
+        throw new InvalidOperationException("Daily mode needs at least one product code.");
+    }
+
+    var rangeEnd = DateTime.Today.AddDays(-lagDays);
+    var rangeStart = rangeEnd.AddDays(1 - lookbackDays);
+
+    await RunAutomaticImageryWindowAsync(
+        config,
+        projectRoot,
+        args,
+        bbox,
+        rangeStart,
+        rangeEnd,
+        productCodes,
+        "daily");
+}
+
+static async Task RunRangeModeAsync(AppConfig config, string projectRoot, string[] args)
+{
+    ValidateAutomaticModeConfig(config, "range");
+    var bbox = ResolveConfiguredBbox(config, args);
+    var productCodes = ResolveProductCodes(GetArgValue(args, "--products"), config.DailyCheck.ProductCodes);
+    if (productCodes.Count == 0)
+    {
+        throw new InvalidOperationException("Range mode needs at least one product code.");
+    }
+
+    var fromText = GetArgValue(args, "--from") ?? GetArgValue(args, "--start");
+    var toText = GetArgValue(args, "--to") ?? GetArgValue(args, "--end");
+    if (!TryParseDate(fromText, out var fromDate) || !TryParseDate(toText, out var toDate))
+    {
+        throw new InvalidOperationException("Range mode requires --from yyyy-MM-dd and --to yyyy-MM-dd.");
+    }
+
+    if (toDate < fromDate)
+    {
+        throw new InvalidOperationException("--to must be greater than or equal to --from.");
+    }
+
+    Console.WriteLine(
+        $"Range check processing {fromDate:yyyy-MM-dd} through {toDate:yyyy-MM-dd}; " +
+        $"products={string.Join(", ", productCodes)}.");
+
+    for (var date = fromDate; date <= toDate; date = date.AddDays(1))
+    {
+        await RunAutomaticImageryWindowAsync(
+            config,
+            projectRoot,
+            args,
+            bbox,
+            date,
+            date,
+            productCodes,
+            "range");
+    }
+}
+
+static async Task RunAutomaticImageryWindowAsync(
+    AppConfig config,
+    string projectRoot,
+    string[] args,
+    Bbox bbox,
+    DateTime rangeStart,
+    DateTime rangeEnd,
+    IReadOnlyList<string> productCodes,
+    string modeName)
+{
+    var osgeoRoot = config.OsgeoRoot ?? throw new InvalidOperationException($"OsgeoRoot is required for {modeName} mode.");
+    var sqlConnectionString = config.SqlConnectionString ?? throw new InvalidOperationException($"SqlConnectionString is required for {modeName} mode.");
+    var outputRoot = config.OutputRootPath ?? throw new InvalidOperationException($"OutputRootPath is required for {modeName} mode.");
+    var cloudMax = config.FarmCloudScreening.Enabled
+        ? 100
+        : GetIntArg(args, "--cloud") ?? config.Cli.CloudCoverMax;
+
+    Console.WriteLine($"Searching {rangeStart:yyyy-MM-dd} through {rangeEnd:yyyy-MM-dd}.");
+
+    using var http = CreateHttpClient();
+    var stac = new StacClient(http);
+    var items = await stac.SearchAsync(bbox, rangeStart, rangeEnd, cloudMax, 100);
+    if (items.Count == 0)
+    {
+        Console.WriteLine($"No Sentinel scenes found for {rangeStart:yyyy-MM-dd} through {rangeEnd:yyyy-MM-dd}.");
+        return;
+    }
+
+    var workRoot = ResolveRootPath(config.WorkRoot ?? "data", projectRoot);
+    var runRoot = Path.Combine(
+        workRoot,
+        modeName,
+        $"{rangeStart:yyyy-MM-dd}_{rangeEnd:yyyy-MM-dd}");
+    Directory.CreateDirectory(runRoot);
+
+    var downloader = new BandDownloader(http, stac);
+    FarmSceneCandidate selectedCandidate;
+    if (config.FarmCloudScreening.Enabled)
+    {
+        var selector = new FarmSceneSelector(downloader, new GdalToolRunner(osgeoRoot));
+        var selection = await selector.SelectAsync(
+            items,
+            bbox,
+            Path.Combine(runRoot, "screening"),
+            config.FarmCloudScreening);
+        selectedCandidate = selection.Selected;
+    }
+    else
+    {
+        var selectedItem = items.OrderBy(item => item.CloudCover ?? double.MaxValue).First();
+        selectedCandidate = new FarmSceneCandidate(
+            selectedItem.AcquisitionKey,
+            selectedItem.AcquiredAt,
+            new[] { selectedItem },
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+            runRoot,
+            new FarmCloudScore(0, 0, 0, 0, 0, 0, 0, 0, 0, selectedItem.CloudCover ?? 0, 0, selectedItem.CloudCover ?? 0, 0, 0, 0));
+    }
+
+    var selectedDate = selectedCandidate.AcquiredAt?.UtcDateTime.Date ?? rangeEnd.Date;
+    var dateKey = selectedDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+    var repo = new JobRepository(sqlConnectionString);
+    var availableProducts = await repo.GetAvailableProductCodesAsync(dateKey, productCodes);
+    var missingProducts = productCodes
+        .Where(productCode => !availableProducts.Contains(productCode))
+        .ToList();
+
+    if (missingProducts.Count == 0)
+    {
+        Console.WriteLine($"All configured products are already registered for {dateKey}; nothing to process.");
+        CleanWorkImages(runRoot);
+        return;
+    }
+
+    var outputRootPath = ResolveRootPath(outputRoot, projectRoot);
+    var jobId = await repo.InsertDailyJobAsync(
+        new DailySentinelGrabJobRequest
+        {
+            JobName = $"{modeName} Sentinel imagery {dateKey}",
+            Layer = config.DailyCheck.Layer,
+            DateKey = dateKey,
+            DateFrom = selectedDate,
+            DateTo = selectedDate,
+            CloudCoverMax = cloudMax,
+            Bbox = bbox,
+            OutputRootPath = outputRootPath,
+            ZoomMin = config.DailyCheck.ZoomMin,
+            ZoomMax = config.DailyCheck.ZoomMax,
+            Priority = config.DailyCheck.Priority,
+            CreatedBy = config.DailyCheck.CreatedBy
+        },
+        missingProducts);
+
+    Console.WriteLine($"Queued {modeName} SentinelGrab job {jobId} for {dateKey}; products={string.Join(", ", missingProducts)}.");
+
+    var job = new SentinelGrabJob
+    {
+        JobId = jobId,
+        Status = "Queued",
+        DateFrom = selectedDate,
+        DateTo = selectedDate,
+        DateKey = dateKey,
+        BboxMinLon = bbox.MinLon,
+        BboxMinLat = bbox.MinLat,
+        BboxMaxLon = bbox.MaxLon,
+        BboxMaxLat = bbox.MaxLat,
+        CloudCoverMax = cloudMax,
+        PreferMosaic = false,
+        MaxScenes = 1,
+        ZoomMin = config.DailyCheck.ZoomMin,
+        ZoomMax = config.DailyCheck.ZoomMax,
+        OutputRootPath = outputRootPath
+    };
+
+    try
+    {
+        await ProcessJobAsync(job, repo, config, projectRoot);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"{modeName} job {jobId} failed: {ex.Message}");
+        await repo.MarkJobFailedAsync(jobId);
+        throw;
+    }
+    finally
+    {
+        var workRootPath = ResolveRootPath(config.WorkRoot ?? "data", projectRoot);
+        CleanWorkImages(Path.Combine(workRootPath, jobId.ToString(CultureInfo.InvariantCulture)));
+        CleanWorkImages(runRoot);
+    }
+}
+
 static async Task RunCliModeAsync(AppConfig config, string projectRoot, string[] args)
 {
     if (PipelineWaterOperations.IsPipelineWaterProduct(GetArgValue(args, "--product")))
@@ -91,13 +310,16 @@ static async Task RunCliModeAsync(AppConfig config, string projectRoot, string[]
         return;
     }
 
-    var bboxText = GetArgValue(args, "--bbox") ?? config.Cli.Bbox ?? "-103.86731513843112,50.5123611,-102.9133333,50.99259736981789";
-    var bbox = ParseBbox(bboxText);
+    var bbox = ResolveConfiguredBbox(config, args);
 
     var year = GetArgValue(args, "--year") is { } y && int.TryParse(y, out var yv) ? yv : config.Cli.Year;
     var month = GetArgValue(args, "--month") is { } m && int.TryParse(m, out var mv) ? mv : config.Cli.Month;
     var day = GetArgValue(args, "--day") is { } d && int.TryParse(d, out var dv) ? dv : (int?)null;
     var cloudMax = GetArgValue(args, "--cloud") is { } c && int.TryParse(c, out var cv) ? cv : config.Cli.CloudCoverMax;
+    var farmCloudMax = GetArgValue(args, "--farm-cloud") is { } fc
+        && double.TryParse(fc, NumberStyles.Float, CultureInfo.InvariantCulture, out var fcv)
+            ? fcv
+            : config.FarmCloudScreening.MaxCloudOrShadowPercent;
 
     DateTime rangeStart;
     DateTime rangeEnd;
@@ -131,14 +353,41 @@ static async Task RunCliModeAsync(AppConfig config, string projectRoot, string[]
         return;
     }
 
-    var best = items.OrderBy(i => i.CloudCover ?? double.MaxValue).First();
-    Console.WriteLine($"Best scene: {best.Id} cloud={(best.CloudCover ?? 0):0.0}%");
-
-    await File.WriteAllTextAsync(Path.Combine(outDir, "item.json"), best.RawJson);
-
     var bands = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "B02", "B03", "B04", "SCL" };
     var downloader = new BandDownloader(http, stac);
-    await downloader.DownloadBandsAsync(best, bands, outDir);
+    string tileInputDir;
+
+    if (config.FarmCloudScreening.Enabled)
+    {
+        if (string.IsNullOrWhiteSpace(config.OsgeoRoot))
+        {
+            throw new InvalidOperationException("OsgeoRoot is required when FarmCloudScreening is enabled.");
+        }
+
+        var selector = new FarmSceneSelector(downloader, new GdalToolRunner(config.OsgeoRoot));
+        var selection = await selector.SelectAsync(
+            items,
+            bbox,
+            Path.Combine(outDir, "screening"),
+            config.FarmCloudScreening,
+            farmCloudMax);
+
+        tileInputDir = selection.Selected.InputDir;
+        foreach (var item in selection.Selected.Items)
+        {
+            var sceneFolder = selection.Selected.SceneFolders[item.Id];
+            await downloader.DownloadBandsAsync(item, bands, sceneFolder);
+        }
+    }
+    else
+    {
+        var best = items.OrderBy(i => i.CloudCover ?? double.MaxValue).First();
+        Console.WriteLine($"Best scene by whole-tile cloud metadata: {best.Id} cloud={(best.CloudCover ?? 0):0.0}%");
+
+        await File.WriteAllTextAsync(Path.Combine(outDir, "item.json"), best.RawJson);
+        await downloader.DownloadBandsAsync(best, bands, outDir);
+        tileInputDir = outDir;
+    }
 
     if (string.IsNullOrWhiteSpace(config.OutputRootPath))
     {
@@ -154,24 +403,31 @@ static async Task RunCliModeAsync(AppConfig config, string projectRoot, string[]
 
     var outputRootPath = ResolveRootPath(config.OutputRootPath, projectRoot);
     var tileBuilder = new GdalProductTileBuilder();
-    var result = await tileBuilder.BuildAsync(new TileBuildRequest
+    try
     {
-        JobId = 0,
-        ProductCode = "RGB",
-        DateKey = outputFolder,
-        InputDir = outDir,
-        OutputRootPath = outputRootPath,
-        ProductSubPath = "rgb",
-        ZoomMin = 8,
-        ZoomMax = 16,
-        OsgeoRoot = config.OsgeoRoot,
-        ClipBbox = bbox,
-        Processes = Math.Max(1, config.DefaultProcesses),
-        ScaleMaxRgb = config.DefaultScaleMaxRGB
-    });
+        var result = await tileBuilder.BuildAsync(new TileBuildRequest
+        {
+            JobId = 0,
+            ProductCode = "RGB",
+            DateKey = outputFolder,
+            InputDir = tileInputDir,
+            OutputRootPath = outputRootPath,
+            ProductSubPath = "rgb",
+            ZoomMin = 8,
+            ZoomMax = 16,
+            OsgeoRoot = config.OsgeoRoot,
+            ClipBbox = bbox,
+            Processes = Math.Max(1, config.DefaultProcesses),
+            ScaleMaxRgb = config.DefaultScaleMaxRGB
+        });
 
-    Console.WriteLine($"Tile generation completed: {result.OutputDir}");
-    Console.WriteLine(Truncate(result.Log));
+        Console.WriteLine($"Tile generation completed: {result.OutputDir}");
+        Console.WriteLine(Truncate(result.Log));
+    }
+    finally
+    {
+        CleanWorkImages(outDir);
+    }
 }
 
 static async Task RunDbModeAsync(AppConfig config, string projectRoot)
@@ -201,6 +457,11 @@ static async Task RunDbModeAsync(AppConfig config, string projectRoot)
     {
         Console.WriteLine($"Job {job.JobId} failed: {ex.Message}");
         await repo.MarkJobFailedAsync(job.JobId);
+    }
+    finally
+    {
+        var workRoot = ResolveRootPath(config.WorkRoot ?? "data", projectRoot);
+        CleanWorkImages(Path.Combine(workRoot, job.JobId.ToString(CultureInfo.InvariantCulture)));
     }
 }
 
@@ -267,9 +528,23 @@ static async Task ProcessJobAsync(SentinelGrabJob job, JobRepository repo, AppCo
         return;
     }
 
-    var bbox = ResolveBbox(job);
+    var requestedBbox = ResolveBbox(job);
+    var areaLimitBbox = BuildAreaLimitBbox(config.AreaLimit);
+    var bbox = ApplyAreaLimit(requestedBbox, areaLimitBbox);
+    if (bbox != requestedBbox)
+    {
+        Console.WriteLine($"Job bbox capped to configured AreaLimit: {FormatBbox(bbox)}.");
+    }
 
-    var cloudMax = job.CloudCoverMax ?? 100;
+    var configuredTileCloudMax = job.CloudCoverMax ?? 100;
+    var cloudMax = config.FarmCloudScreening.Enabled ? 100 : configuredTileCloudMax;
+    if (config.FarmCloudScreening.Enabled && configuredTileCloudMax < 100)
+    {
+        Console.WriteLine(
+            $"Ignoring job CloudCoverMax={configuredTileCloudMax} during STAC search because it is whole-tile metadata. " +
+            "FarmCloudScreening must inspect the local SCL pixels, including tiles reported as highly cloudy.");
+    }
+
     var maxScenes = Math.Max(1, job.MaxScenes ?? 1);
     var wantMultiple = job.PreferMosaic || maxScenes > 1;
     if (job.PreferMosaic && maxScenes < 2)
@@ -279,6 +554,10 @@ static async Task ProcessJobAsync(SentinelGrabJob job, JobRepository repo, AppCo
 
     var bandSet = ComputeRequiredBands(rasterProducts, config.WaterDetection);
     bandSet.Add("SCL");
+
+    var workRoot = ResolveRootPath(config.WorkRoot ?? "data", projectRoot);
+    var jobRoot = Path.Combine(workRoot, job.JobId.ToString(CultureInfo.InvariantCulture));
+    Directory.CreateDirectory(jobRoot);
 
     using var http = CreateHttpClient();
     var stac = new StacClient(http);
@@ -310,23 +589,61 @@ static async Task ProcessJobAsync(SentinelGrabJob job, JobRepository repo, AppCo
         }
     }
 
-    var selected = items
-        .OrderBy(i => i.CloudCover ?? double.MaxValue)
-        .Take(wantMultiple ? maxScenes : 1)
-        .ToList();
+    var downloader = new BandDownloader(http, stac);
+    IReadOnlyList<StacItem> selected;
+    IReadOnlyDictionary<string, string>? selectedSceneFolders = null;
+    string tileInputDir;
+
+    if (string.IsNullOrWhiteSpace(sceneId) && config.FarmCloudScreening.Enabled)
+    {
+        if (string.IsNullOrWhiteSpace(config.OsgeoRoot))
+        {
+            throw new InvalidOperationException("OsgeoRoot is required when FarmCloudScreening is enabled.");
+        }
+
+        if (wantMultiple)
+        {
+            Console.WriteLine(
+                "FarmCloudScreening selects one acquisition pass and all intersecting MGRS tiles. " +
+                "PreferMosaic/MaxScenes is not used for a multi-date cloud mosaic.");
+        }
+
+        var selector = new FarmSceneSelector(downloader, new GdalToolRunner(config.OsgeoRoot));
+        var selection = await selector.SelectAsync(
+            items,
+            bbox,
+            Path.Combine(jobRoot, "screening"),
+            config.FarmCloudScreening);
+
+        selected = selection.Selected.Items;
+        selectedSceneFolders = selection.Selected.SceneFolders;
+        tileInputDir = selection.Selected.InputDir;
+    }
+    else
+    {
+        selected = items
+            .OrderBy(i => i.CloudCover ?? double.MaxValue)
+            .Take(wantMultiple ? maxScenes : 1)
+            .ToList();
+
+        tileInputDir = jobRoot;
+    }
 
     Console.WriteLine($"Selected {selected.Count} scene(s). Bands: {string.Join(", ", bandSet)}");
 
-    var workRoot = ResolveRootPath(config.WorkRoot ?? "data", projectRoot);
-    var jobRoot = Path.Combine(workRoot, job.JobId.ToString(CultureInfo.InvariantCulture));
-    Directory.CreateDirectory(jobRoot);
-
-    var downloader = new BandDownloader(http, stac);
     foreach (var item in selected)
     {
-        var sceneFolder = selected.Count == 1 && !wantMultiple
-            ? Path.Combine(jobRoot, "single")
-            : Path.Combine(jobRoot, SanitizePathSegment(item.Id));
+        string sceneFolder;
+        if (selectedSceneFolders is not null && selectedSceneFolders.TryGetValue(item.Id, out var screenedFolder))
+        {
+            sceneFolder = screenedFolder;
+        }
+        else
+        {
+            sceneFolder = selected.Count == 1 && !wantMultiple
+                ? Path.Combine(jobRoot, "single")
+                : Path.Combine(jobRoot, SanitizePathSegment(item.Id));
+        }
 
         Directory.CreateDirectory(sceneFolder);
         await File.WriteAllTextAsync(Path.Combine(sceneFolder, "item.json"), item.RawJson);
@@ -367,7 +684,7 @@ static async Task ProcessJobAsync(SentinelGrabJob job, JobRepository repo, AppCo
                 JobId = job.JobId,
                 ProductCode = productCode,
                 DateKey = dateKey,
-                InputDir = jobRoot,
+                InputDir = tileInputDir,
                 OutputRootPath = outputRootPath,
                 ProductSubPath = productSubPath,
                 ZoomMin = zoomMin,
@@ -538,6 +855,43 @@ static Bbox ResolveBbox(SentinelGrabJob job)
     throw new InvalidOperationException("Job bbox is required (BboxMinLon/Lat/MaxLon/MaxLat or Bbox string).");
 }
 
+static void ValidateAutomaticModeConfig(AppConfig config, string modeName)
+{
+    if (string.IsNullOrWhiteSpace(config.SqlConnectionString))
+    {
+        throw new InvalidOperationException($"SqlConnectionString is required for {modeName} mode so processed layers are registered.");
+    }
+
+    if (string.IsNullOrWhiteSpace(config.OutputRootPath))
+    {
+        throw new InvalidOperationException($"OutputRootPath is required for {modeName} mode.");
+    }
+
+    if (string.IsNullOrWhiteSpace(config.OsgeoRoot))
+    {
+        throw new InvalidOperationException($"OsgeoRoot is required for {modeName} mode.");
+    }
+
+    if (!config.FarmCloudScreening.Enabled)
+    {
+        Console.WriteLine($"FarmCloudScreening is disabled; {modeName} mode will select by whole-tile cloud metadata only.");
+    }
+}
+
+static Bbox ResolveConfiguredBbox(AppConfig config, string[] args)
+{
+    var areaLimitBbox = BuildAreaLimitBbox(config.AreaLimit);
+    var bboxText = GetArgValue(args, "--bbox") ?? config.Cli.Bbox ?? FormatBbox(areaLimitBbox);
+    var requestedBbox = ParseBbox(bboxText);
+    var bbox = ApplyAreaLimit(requestedBbox, areaLimitBbox);
+    if (bbox != requestedBbox)
+    {
+        Console.WriteLine($"Using area-limited bbox {FormatBbox(bbox)}.");
+    }
+
+    return bbox;
+}
+
 static Bbox ParseBbox(string bboxText)
 {
     var parts = bboxText.Split(new[] { ',', ' ' }, StringSplitOptions.RemoveEmptyEntries);
@@ -552,6 +906,53 @@ static Bbox ParseBbox(string bboxText)
         double.Parse(parts[2], CultureInfo.InvariantCulture),
         double.Parse(parts[3], CultureInfo.InvariantCulture)
     );
+}
+
+static Bbox BuildAreaLimitBbox(AreaLimitConfig areaLimit)
+{
+    if (areaLimit.RadiusMiles <= 0)
+    {
+        throw new InvalidOperationException("AreaLimit RadiusMiles must be greater than zero.");
+    }
+
+    const double kilometersPerMile = 1.609344d;
+    const double kilometersPerDegree = 111.32d;
+
+    var radiusKm = areaLimit.RadiusMiles * kilometersPerMile;
+    var deltaLat = radiusKm / kilometersPerDegree;
+    var deltaLon = radiusKm / (kilometersPerDegree * Math.Cos(areaLimit.CenterLat * Math.PI / 180d));
+
+    return new Bbox(
+        areaLimit.CenterLon - deltaLon,
+        areaLimit.CenterLat - deltaLat,
+        areaLimit.CenterLon + deltaLon,
+        areaLimit.CenterLat + deltaLat);
+}
+
+static Bbox ApplyAreaLimit(Bbox requestedBbox, Bbox areaLimitBbox)
+{
+    var minLon = Math.Max(requestedBbox.MinLon, areaLimitBbox.MinLon);
+    var minLat = Math.Max(requestedBbox.MinLat, areaLimitBbox.MinLat);
+    var maxLon = Math.Min(requestedBbox.MaxLon, areaLimitBbox.MaxLon);
+    var maxLat = Math.Min(requestedBbox.MaxLat, areaLimitBbox.MaxLat);
+
+    if (minLon >= maxLon || minLat >= maxLat)
+    {
+        throw new InvalidOperationException(
+            $"Requested bbox {FormatBbox(requestedBbox)} does not overlap configured AreaLimit {FormatBbox(areaLimitBbox)}.");
+    }
+
+    return new Bbox(minLon, minLat, maxLon, maxLat);
+}
+
+static string FormatBbox(Bbox bbox)
+{
+    return string.Join(
+        ",",
+        bbox.MinLon.ToString("G17", CultureInfo.InvariantCulture),
+        bbox.MinLat.ToString("G17", CultureInfo.InvariantCulture),
+        bbox.MaxLon.ToString("G17", CultureInfo.InvariantCulture),
+        bbox.MaxLat.ToString("G17", CultureInfo.InvariantCulture));
 }
 
 static string ResolveMode(string[] args, AppConfig config)
@@ -583,6 +984,26 @@ static string? GetArgValue(string[] args, string name)
     return null;
 }
 
+static bool TryParseDate(string? value, out DateTime date)
+{
+    if (!string.IsNullOrWhiteSpace(value)
+        && DateTime.TryParseExact(value, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed))
+    {
+        date = parsed.Date;
+        return true;
+    }
+
+    date = default;
+    return false;
+}
+
+static int? GetIntArg(string[] args, string name)
+{
+    return GetArgValue(args, name) is { } value && int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+        ? parsed
+        : null;
+}
+
 static double? GetDoubleArg(string[] args, string name)
 {
     return GetArgValue(args, name) is { } value && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
@@ -596,6 +1017,20 @@ static decimal? GetDecimalArg(string[] args, string name)
         ? parsed
         : null;
 }
+
+static IReadOnlyList<string> ResolveProductCodes(string? productsArg, IEnumerable<string> configuredProducts)
+{
+    var source = !string.IsNullOrWhiteSpace(productsArg)
+        ? productsArg.Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries)
+        : configuredProducts;
+
+    return source
+        .Select(product => product.Trim().ToUpperInvariant())
+        .Where(product => product.Length > 0)
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToList();
+}
+
 static HttpClient CreateHttpClient()
 {
     var http = new HttpClient(new HttpClientHandler
@@ -642,6 +1077,11 @@ static string Truncate(string? value, int maxLen = 20000)
     }
 
     return value.Length <= maxLen ? value : value.Substring(0, maxLen);
+}
+
+static void CleanWorkImages(string root)
+{
+    WorkImageCleaner.LogResult(root, WorkImageCleaner.Clean(root));
 }
 
 static string? FindProjectRoot(string startDir)

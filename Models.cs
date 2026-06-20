@@ -34,6 +34,7 @@ public static class SentinelGrabProductCodes
 {
     public const string PipelineWater = "PIPELINE_WATER";
 }
+
 public sealed record AvailableLayer
 {
     public long JobId { get; init; }
@@ -49,6 +50,92 @@ public sealed record AvailableLayer
     public string OutputRootPath { get; init; } = "";
     public string ProductSubPath { get; init; } = "";
     public string OutputDir { get; init; } = "";
+}
+
+public sealed record DailySentinelGrabJobRequest
+{
+    public string JobName { get; init; } = "";
+    public string Layer { get; init; } = "";
+    public string DateKey { get; init; } = "";
+    public DateTime DateFrom { get; init; }
+    public DateTime DateTo { get; init; }
+    public int CloudCoverMax { get; init; } = 100;
+    public Bbox Bbox { get; init; }
+    public string OutputRootPath { get; init; } = "";
+    public int ZoomMin { get; init; } = 8;
+    public int ZoomMax { get; init; } = 14;
+    public int Priority { get; init; } = 50;
+    public string CreatedBy { get; init; } = "SentinelGrabDaily";
+}
+
+public sealed record WaterBuildRequest
+{
+    public long JobId { get; init; }
+    public long JobProductId { get; init; }
+    public string DateKey { get; init; } = "";
+    public string InputDir { get; init; } = "";
+    public string OutputRootPath { get; init; } = "";
+    public string ProductSubPath { get; init; } = "";
+    public string OsgeoRoot { get; init; } = "";
+    public Bbox? ClipBbox { get; init; }
+    public WaterDetectionConfig Config { get; init; } = new();
+}
+
+public sealed record WaterBuildResult
+{
+    public string OutputDirectory { get; init; } = "";
+    public string GeoJsonPath { get; init; } = "";
+    public string DetectionMethod { get; init; } = "";
+    public string AlgorithmVersion { get; init; } = "";
+    public int ProcessingEpsg { get; init; }
+    public double SourceResolutionMetres { get; init; }
+    public double ClearCoveragePercent { get; init; }
+    public double UnknownCoveragePercent { get; init; }
+    public int PolygonCount { get; init; }
+    public double TotalWaterAreaSquareMetres { get; init; }
+    public IReadOnlyList<WaterPolygonResult> Polygons { get; init; } = Array.Empty<WaterPolygonResult>();
+    public string ProcessingLog { get; init; } = "";
+}
+
+public sealed record WaterPolygonResult
+{
+    public int Ordinal { get; init; }
+    public string Wgs84Wkt { get; init; } = "";
+    public double AreaSquareMetres { get; init; }
+}
+
+public sealed record WaterDetectionRecord
+{
+    public long WaterDetectionId { get; init; }
+    public long JobId { get; init; }
+    public long JobProductId { get; init; }
+    public string DateKey { get; init; } = "";
+    public string AcquisitionKey { get; init; } = "";
+    public DateTimeOffset? AcquiredAt { get; init; }
+    public string SourceItemIdsJson { get; init; } = "";
+    public string DetectionMethod { get; init; } = "";
+    public string AlgorithmVersion { get; init; } = "";
+    public string ThresholdsJson { get; init; } = "";
+    public int ProcessingSrid { get; init; }
+    public double ResolutionMetres { get; init; }
+    public double MinAreaSquareMetres { get; init; }
+    public double ClearCoveragePercent { get; init; }
+    public double UnknownCoveragePercent { get; init; }
+    public int PolygonCount { get; init; }
+    public double TotalWaterAreaSquareMetres { get; init; }
+    public string GeoJsonPath { get; init; } = "";
+    public DateTime? CreatedAt { get; init; }
+    public DateTime? ModifiedAt { get; init; }
+}
+
+public sealed record WaterPolygonRecord
+{
+    public long WaterPolygonId { get; init; }
+    public long WaterDetectionId { get; init; }
+    public int PolygonOrdinal { get; init; }
+    public string Shape { get; init; } = "";
+    public double AreaSquareMetres { get; init; }
+    public DateTime? CreatedAt { get; init; }
 }
 
 public sealed record SentinelPipelinePathRecord
@@ -106,6 +193,7 @@ public sealed record PipelinePathEndpointGap
     public int ToComponentIndex { get; init; }
     public double GapMetres { get; init; }
 }
+
 public sealed record SentinelPipelineWaterRequestRecord
 {
     public long JobProductId { get; init; }
@@ -217,6 +305,7 @@ public sealed record PipelineWaterBuildResult
     public IReadOnlyList<PipelineWaterZoneResult> Zones { get; init; } = Array.Empty<PipelineWaterZoneResult>();
     public string ProcessingLog { get; init; } = "";
 }
+
 public sealed record SentinelPipelineWaterRunRecord
 {
     public long PipelineWaterRunId { get; init; }
@@ -276,6 +365,7 @@ public sealed record SentinelPipelineWaterZoneRecord
     public decimal? MinimumWaterDistanceM { get; init; }
     public string RouteZoneGeometry { get; init; } = "";
 }
+
 public readonly record struct Bbox(double MinLon, double MinLat, double MaxLon, double MaxLat)
 {
     public double[] ToArray() => new[] { MinLon, MinLat, MaxLon, MaxLat };

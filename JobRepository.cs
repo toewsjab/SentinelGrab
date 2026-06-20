@@ -110,6 +110,155 @@ VALUES (@JobId, 'RGB', 'rgb', 'Queued');";
         };
     }
 
+    public async Task<HashSet<string>> GetAvailableProductCodesAsync(string dateKey, IReadOnlyCollection<string> productCodes)
+    {
+        var available = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (productCodes.Count == 0)
+        {
+            return available;
+        }
+
+        const string sql = @"
+SELECT ProductCode
+FROM dbo.SentinelGrabAvailableLayers
+WHERE DateKey = @DateKey
+    AND ProductCode = @ProductCode;";
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+
+        foreach (var productCode in productCodes)
+        {
+            await using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.Add("@DateKey", SqlDbType.NVarChar, 20).Value = dateKey;
+            cmd.Parameters.Add("@ProductCode", SqlDbType.NVarChar, 20).Value = productCode;
+
+            var result = await cmd.ExecuteScalarAsync();
+            if (result is not null)
+            {
+                available.Add(productCode);
+            }
+        }
+
+        return available;
+    }
+
+    public async Task<long> InsertDailyJobAsync(DailySentinelGrabJobRequest request, IReadOnlyCollection<string> productCodes)
+    {
+        if (productCodes.Count == 0)
+        {
+            throw new InvalidOperationException("At least one product is required for a daily SentinelGrab job.");
+        }
+
+        const string jobSql = @"
+INSERT INTO dbo.SentinelGrabJobs
+(
+    JobName,
+    Layer,
+    DateKey,
+    DateFrom,
+    DateTo,
+    CloudCoverMax,
+    MaxScenes,
+    PreferMosaic,
+    MinLon,
+    MinLat,
+    MaxLon,
+    MaxLat,
+    AoiGeoJson,
+    OutputRootPath,
+    ZoomMin,
+    ZoomMax,
+    TileFormat,
+    Priority,
+    CreatedBy
+)
+OUTPUT INSERTED.JobId
+VALUES
+(
+    @JobName,
+    @Layer,
+    @DateKey,
+    @DateFrom,
+    @DateTo,
+    @CloudCoverMax,
+    @MaxScenes,
+    @PreferMosaic,
+    @MinLon,
+    @MinLat,
+    @MaxLon,
+    @MaxLat,
+    @AoiGeoJson,
+    @OutputRootPath,
+    @ZoomMin,
+    @ZoomMax,
+    @TileFormat,
+    @Priority,
+    @CreatedBy
+);";
+
+        const string productSql = @"
+INSERT INTO dbo.SentinelGrabJobProducts
+(
+    JobId,
+    ProductCode,
+    OutputSubPath
+)
+VALUES
+(
+    @JobId,
+    @ProductCode,
+    @OutputSubPath
+);";
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        await using var transaction = (SqlTransaction)await conn.BeginTransactionAsync();
+
+        try
+        {
+            await using var jobCmd = new SqlCommand(jobSql, conn, transaction);
+            jobCmd.Parameters.Add("@JobName", SqlDbType.NVarChar, 200).Value = request.JobName;
+            jobCmd.Parameters.Add("@Layer", SqlDbType.NVarChar, 50).Value = request.Layer;
+            jobCmd.Parameters.Add("@DateKey", SqlDbType.NVarChar, 20).Value = request.DateKey;
+            jobCmd.Parameters.Add("@DateFrom", SqlDbType.Date).Value = request.DateFrom.Date;
+            jobCmd.Parameters.Add("@DateTo", SqlDbType.Date).Value = request.DateTo.Date;
+            jobCmd.Parameters.Add("@CloudCoverMax", SqlDbType.Decimal).Value = request.CloudCoverMax;
+            jobCmd.Parameters.Add("@MaxScenes", SqlDbType.Int).Value = 1;
+            jobCmd.Parameters.Add("@PreferMosaic", SqlDbType.Bit).Value = false;
+            jobCmd.Parameters.Add("@MinLon", SqlDbType.Float).Value = request.Bbox.MinLon;
+            jobCmd.Parameters.Add("@MinLat", SqlDbType.Float).Value = request.Bbox.MinLat;
+            jobCmd.Parameters.Add("@MaxLon", SqlDbType.Float).Value = request.Bbox.MaxLon;
+            jobCmd.Parameters.Add("@MaxLat", SqlDbType.Float).Value = request.Bbox.MaxLat;
+            jobCmd.Parameters.Add("@AoiGeoJson", SqlDbType.NVarChar, -1).Value = DBNull.Value;
+            jobCmd.Parameters.Add("@OutputRootPath", SqlDbType.NVarChar, 400).Value = request.OutputRootPath;
+            jobCmd.Parameters.Add("@ZoomMin", SqlDbType.Int).Value = request.ZoomMin;
+            jobCmd.Parameters.Add("@ZoomMax", SqlDbType.Int).Value = request.ZoomMax;
+            jobCmd.Parameters.Add("@TileFormat", SqlDbType.NVarChar, 10).Value = "png";
+            jobCmd.Parameters.Add("@Priority", SqlDbType.Int).Value = request.Priority;
+            jobCmd.Parameters.Add("@CreatedBy", SqlDbType.NVarChar, 100).Value = request.CreatedBy;
+
+            var jobId = Convert.ToInt64(await jobCmd.ExecuteScalarAsync(), CultureInfo.InvariantCulture);
+
+            foreach (var productCode in productCodes)
+            {
+                await using var productCmd = new SqlCommand(productSql, conn, transaction);
+                productCmd.Parameters.Add("@JobId", SqlDbType.BigInt).Value = jobId;
+                productCmd.Parameters.Add("@ProductCode", SqlDbType.NVarChar, 20).Value = productCode;
+                productCmd.Parameters.Add("@OutputSubPath", SqlDbType.NVarChar, 200).Value = DBNull.Value;
+                await productCmd.ExecuteNonQueryAsync();
+            }
+
+            await transaction.CommitAsync();
+            return jobId;
+        }
+        catch
+        {
+            await transaction.RollbackAsync();
+            throw;
+        }
+    }
+
     public async Task<SentinelPipelinePathRecord> InsertPipelinePathAsync(SentinelPipelinePathRecord path)
     {
         const string sql = @"
@@ -344,6 +493,7 @@ VALUES
             throw;
         }
     }
+
     public async Task<PipelineWaterRunSaveResult> ReplacePipelineWaterRunAsync(PipelineWaterRunSaveRequest request)
     {
         const string deleteSql = @"
@@ -546,6 +696,7 @@ VALUES
             throw;
         }
     }
+
     public async Task DeactivatePipelinePathAsync(long pipelinePathId)
     {
         const string sql = @"
@@ -560,6 +711,7 @@ WHERE PipelinePathId = @PipelinePathId;";
         cmd.Parameters.Add("@PipelinePathId", SqlDbType.BigInt).Value = pipelinePathId;
         await cmd.ExecuteNonQueryAsync();
     }
+
     public async Task UpdateJobProductStatusAsync(long jobProductId, string status, string? lastError, string? lastLog)
     {
         const string sql = @"
@@ -768,6 +920,7 @@ WHERE JobId = @JobId;";
             ModifiedAt = reader.IsDBNull(10) ? null : reader.GetDateTime(10)
         };
     }
+
     private static SentinelPipelineWaterRequestRecord ReadPipelineWaterRequest(SqlDataReader reader)
     {
         return new SentinelPipelineWaterRequestRecord

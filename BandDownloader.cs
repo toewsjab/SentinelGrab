@@ -17,22 +17,30 @@ public sealed class BandDownloader
 
         foreach (var bandKey in bandKeys)
         {
-            var filePath = Path.Combine(outputDir, $"{bandKey}.tif");
-            if (File.Exists(filePath) && new FileInfo(filePath).Length > 0)
-            {
-                Console.WriteLine($"{bandKey}: already downloaded.");
-                continue;
-            }
-
-            if (!item.Assets.TryGetValue(bandKey, out var href))
-            {
-                Console.WriteLine($"Asset {bandKey} missing on item {item.Id} (skipping).");
-                continue;
-            }
-
-            var signed = await _stacClient.SignHrefAsync(href);
-            await DownloadFileWithRetryAsync(signed, filePath, bandKey);
+            await DownloadBandAsync(item, bandKey, outputDir);
         }
+    }
+
+    public async Task<string?> DownloadBandAsync(StacItem item, string bandKey, string outputDir)
+    {
+        Directory.CreateDirectory(outputDir);
+
+        var filePath = Path.Combine(outputDir, $"{bandKey}.tif");
+        if (File.Exists(filePath) && new FileInfo(filePath).Length > 0)
+        {
+            Console.WriteLine($"{bandKey}: already downloaded.");
+            return filePath;
+        }
+
+        if (!item.Assets.TryGetValue(bandKey, out var href))
+        {
+            Console.WriteLine($"Asset {bandKey} missing on item {item.Id} (skipping).");
+            return null;
+        }
+
+        var signed = await _stacClient.SignHrefAsync(href);
+        await DownloadFileWithRetryAsync(signed, filePath, bandKey);
+        return filePath;
     }
 
     private async Task DownloadFileWithRetryAsync(string url, string filePath, string label)

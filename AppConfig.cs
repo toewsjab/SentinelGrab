@@ -12,8 +12,11 @@ public sealed class AppConfig
     public double DefaultNdviMax { get; set; } = 0.9;
     public int DefaultProcesses { get; set; } = 1;
     public CliConfig Cli { get; set; } = new();
+    public AreaLimitConfig AreaLimit { get; set; } = new();
+    public FarmCloudScreeningConfig FarmCloudScreening { get; set; } = new();
     public WaterDetectionConfig WaterDetection { get; set; } = new();
     public PipelineWaterConfig PipelineWater { get; set; } = new();
+    public DailyCheckConfig DailyCheck { get; set; } = new();
 
     public static AppConfig Load(string basePath)
     {
@@ -44,6 +47,23 @@ public sealed class CliConfig
     public int Year { get; set; } = 2025;
     public int Month { get; set; } = 5;
     public int CloudCoverMax { get; set; } = 80;
+}
+
+public sealed class AreaLimitConfig
+{
+    public double CenterLat { get; set; } = 50.73766897400433d;
+    public double CenterLon { get; set; } = -103.42551899991804d;
+    public double RadiusMiles { get; set; } = 15d;
+}
+
+public sealed class FarmCloudScreeningConfig
+{
+    public bool Enabled { get; set; } = false;
+    public double MaxCloudOrShadowPercent { get; set; } = 1d;
+    public double MinDataCoveragePercent { get; set; } = 99d;
+
+    // 0 means evaluate every acquisition returned by the STAC search.
+    public int MaxAcquisitionsToCheck { get; set; } = 0;
 }
 
 public sealed class WaterDetectionConfig
@@ -98,7 +118,6 @@ public sealed class WaterDetectionConfig
     }
 }
 
-// Screening defaults only; not corrosion criteria or regulatory limits.
 public sealed class PipelineWaterConfig
 {
     public double CorridorHalfWidthM { get; set; } = 50d;
@@ -220,4 +239,16 @@ public sealed class PipelineWaterConfig
             throw new InvalidOperationException($"PipelineWater {name} must be a finite value between 0 and 1.");
         }
     }
+}
+
+public sealed class DailyCheckConfig
+{
+    public int LookbackDays { get; set; } = 14;
+    public int LagDays { get; set; } = 1;
+    public string[] ProductCodes { get; set; } = new[] { "RGB", "NDVI", "NDMI", "NDRE" };
+    public int ZoomMin { get; set; } = 8;
+    public int ZoomMax { get; set; } = 14;
+    public int Priority { get; set; } = 50;
+    public string Layer { get; set; } = "Sentinel-2 L2A";
+    public string CreatedBy { get; set; } = "SentinelGrabDaily";
 }
