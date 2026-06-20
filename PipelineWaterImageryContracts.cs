@@ -60,6 +60,49 @@ public delegate Task<PipelineWaterSectionDetection> PipelineWaterSectionDetector
     PipelineWaterSectionDetectionRequest request,
     CancellationToken cancellationToken);
 
+public sealed record PipelineWaterBinTemporalStats
+{
+    public int BinIndex { get; init; }
+    public decimal StartChainageM { get; init; }
+    public decimal EndChainageM { get; init; }
+    public int WaterObservationCount { get; init; }
+    public int DryObservationCount { get; init; }
+    public int UnknownObservationCount { get; init; }
+    public int ClearObservationCount => WaterObservationCount + DryObservationCount;
+    public decimal? WaterFrequency { get; init; }
+    public string PersistenceClass { get; init; } = "";
+    public DateTimeOffset? FirstWaterObservedAt { get; init; }
+    public DateTimeOffset? LastWaterObservedAt { get; init; }
+    public decimal? MaximumWaterAreaM2 { get; init; }
+    public decimal? MinimumWaterDistanceM { get; init; }
+    public bool HasCentrelineCrossing { get; init; }
+    public string RouteBinWkt { get; init; } = "";
+}
+
+public sealed record PipelineWaterRunSaveRequest
+{
+    public long JobId { get; init; }
+    public long JobProductId { get; init; }
+    public long PipelinePathId { get; init; }
+    public DateTime DateFrom { get; init; }
+    public DateTime DateTo { get; init; }
+    public string Method { get; init; } = "";
+    public string AlgorithmVersion { get; init; } = "";
+    public decimal CorridorHalfWidthM { get; init; }
+    public decimal AnalysisBinLengthM { get; init; }
+    public int AcquisitionCount { get; init; }
+    public int ClearAcquisitionCount { get; init; }
+    public string OutputDirectory { get; init; } = "";
+    public string? ObservationsGeoJsonPath { get; init; }
+    public string? ZonesGeoJsonPath { get; init; }
+    public IReadOnlyList<PipelineWaterBinObservation> Observations { get; init; } = Array.Empty<PipelineWaterBinObservation>();
+    public IReadOnlyList<PipelineWaterZoneResult> Zones { get; init; } = Array.Empty<PipelineWaterZoneResult>();
+}
+
+public sealed record PipelineWaterRunSaveResult(
+    long PipelineWaterRunId,
+    IReadOnlyList<PipelineWaterZoneResult> Zones);
+
 public sealed record StacAssetCropRequest
 {
     public string AssetKey { get; init; } = "";

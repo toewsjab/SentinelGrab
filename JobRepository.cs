@@ -344,6 +344,208 @@ VALUES
             throw;
         }
     }
+    public async Task<PipelineWaterRunSaveResult> ReplacePipelineWaterRunAsync(PipelineWaterRunSaveRequest request)
+    {
+        const string deleteSql = @"
+DELETE FROM dbo.SentinelPipelineWaterRuns
+WHERE JobProductId = @JobProductId;";
+
+        const string runSql = @"
+INSERT INTO dbo.SentinelPipelineWaterRuns
+(
+    JobId,
+    JobProductId,
+    PipelinePathId,
+    DateFrom,
+    DateTo,
+    Method,
+    AlgorithmVersion,
+    CorridorHalfWidthM,
+    AnalysisBinLengthM,
+    AcquisitionCount,
+    ClearAcquisitionCount,
+    OutputDirectory,
+    ObservationsGeoJsonPath,
+    ZonesGeoJsonPath
+)
+OUTPUT INSERTED.PipelineWaterRunId
+VALUES
+(
+    @JobId,
+    @JobProductId,
+    @PipelinePathId,
+    @DateFrom,
+    @DateTo,
+    @Method,
+    @AlgorithmVersion,
+    @CorridorHalfWidthM,
+    @AnalysisBinLengthM,
+    @AcquisitionCount,
+    @ClearAcquisitionCount,
+    @OutputDirectory,
+    @ObservationsGeoJsonPath,
+    @ZonesGeoJsonPath
+);";
+
+        const string observationSql = @"
+INSERT INTO dbo.SentinelPipelineWaterBinObservations
+(
+    PipelineWaterRunId,
+    AcquisitionKey,
+    AcquiredAt,
+    BinIndex,
+    StartChainageM,
+    EndChainageM,
+    ObservationState,
+    ExposureType,
+    WaterAreaInCorridorM2,
+    LengthOnWaterM,
+    NearestWaterDistanceM,
+    RouteBinGeometry,
+    WaterIntersectionGeometry
+)
+VALUES
+(
+    @PipelineWaterRunId,
+    @AcquisitionKey,
+    @AcquiredAt,
+    @BinIndex,
+    @StartChainageM,
+    @EndChainageM,
+    @ObservationState,
+    @ExposureType,
+    @WaterAreaInCorridorM2,
+    @LengthOnWaterM,
+    @NearestWaterDistanceM,
+    geometry::STGeomFromText(@RouteBinGeometryWkt, 4326),
+    CASE
+        WHEN @WaterIntersectionGeometryWkt IS NULL THEN NULL
+        ELSE geometry::STGeomFromText(@WaterIntersectionGeometryWkt, 4326)
+    END
+);";
+
+        const string zoneSql = @"
+INSERT INTO dbo.SentinelPipelineWaterZones
+(
+    PipelineWaterRunId,
+    ZoneOrdinal,
+    StartChainageM,
+    EndChainageM,
+    LengthM,
+    WaterObservationCount,
+    DryObservationCount,
+    UnknownObservationCount,
+    WaterFrequency,
+    PersistenceClass,
+    FirstWaterObservedAt,
+    LastWaterObservedAt,
+    MaximumWaterAreaM2,
+    MinimumWaterDistanceM,
+    RouteZoneGeometry
+)
+OUTPUT INSERTED.PipelineWaterZoneId
+VALUES
+(
+    @PipelineWaterRunId,
+    @ZoneOrdinal,
+    @StartChainageM,
+    @EndChainageM,
+    @LengthM,
+    @WaterObservationCount,
+    @DryObservationCount,
+    @UnknownObservationCount,
+    @WaterFrequency,
+    @PersistenceClass,
+    @FirstWaterObservedAt,
+    @LastWaterObservedAt,
+    @MaximumWaterAreaM2,
+    @MinimumWaterDistanceM,
+    geometry::STGeomFromText(@RouteZoneGeometryWkt, 4326)
+);";
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync();
+        await using var transaction = (SqlTransaction)await conn.BeginTransactionAsync();
+
+        try
+        {
+            await using (var deleteCmd = new SqlCommand(deleteSql, conn, transaction))
+            {
+                deleteCmd.Parameters.Add("@JobProductId", SqlDbType.BigInt).Value = request.JobProductId;
+                await deleteCmd.ExecuteNonQueryAsync();
+            }
+
+            long runId;
+            await using (var runCmd = new SqlCommand(runSql, conn, transaction))
+            {
+                runCmd.Parameters.Add("@JobId", SqlDbType.BigInt).Value = request.JobId;
+                runCmd.Parameters.Add("@JobProductId", SqlDbType.BigInt).Value = request.JobProductId;
+                runCmd.Parameters.Add("@PipelinePathId", SqlDbType.BigInt).Value = request.PipelinePathId;
+                runCmd.Parameters.Add("@DateFrom", SqlDbType.Date).Value = request.DateFrom.Date;
+                runCmd.Parameters.Add("@DateTo", SqlDbType.Date).Value = request.DateTo.Date;
+                runCmd.Parameters.Add("@Method", SqlDbType.NVarChar, 30).Value = request.Method;
+                runCmd.Parameters.Add("@AlgorithmVersion", SqlDbType.NVarChar, 40).Value = request.AlgorithmVersion;
+                runCmd.Parameters.Add("@CorridorHalfWidthM", SqlDbType.Decimal).Value = request.CorridorHalfWidthM;
+                runCmd.Parameters.Add("@AnalysisBinLengthM", SqlDbType.Decimal).Value = request.AnalysisBinLengthM;
+                runCmd.Parameters.Add("@AcquisitionCount", SqlDbType.Int).Value = request.AcquisitionCount;
+                runCmd.Parameters.Add("@ClearAcquisitionCount", SqlDbType.Int).Value = request.ClearAcquisitionCount;
+                runCmd.Parameters.Add("@OutputDirectory", SqlDbType.NVarChar, 600).Value = request.OutputDirectory;
+                runCmd.Parameters.Add("@ObservationsGeoJsonPath", SqlDbType.NVarChar, 600).Value = (object?)request.ObservationsGeoJsonPath ?? DBNull.Value;
+                runCmd.Parameters.Add("@ZonesGeoJsonPath", SqlDbType.NVarChar, 600).Value = (object?)request.ZonesGeoJsonPath ?? DBNull.Value;
+                runId = Convert.ToInt64(await runCmd.ExecuteScalarAsync(), CultureInfo.InvariantCulture);
+            }
+
+            foreach (var observation in request.Observations)
+            {
+                await using var observationCmd = new SqlCommand(observationSql, conn, transaction);
+                observationCmd.Parameters.Add("@PipelineWaterRunId", SqlDbType.BigInt).Value = runId;
+                observationCmd.Parameters.Add("@AcquisitionKey", SqlDbType.NVarChar, 200).Value = observation.AcquisitionKey;
+                observationCmd.Parameters.Add("@AcquiredAt", SqlDbType.DateTimeOffset).Value = observation.AcquiredAt;
+                observationCmd.Parameters.Add("@BinIndex", SqlDbType.Int).Value = observation.BinIndex;
+                observationCmd.Parameters.Add("@StartChainageM", SqlDbType.Decimal).Value = observation.StartChainageM;
+                observationCmd.Parameters.Add("@EndChainageM", SqlDbType.Decimal).Value = observation.EndChainageM;
+                observationCmd.Parameters.Add("@ObservationState", SqlDbType.VarChar, 12).Value = observation.ObservationState;
+                observationCmd.Parameters.Add("@ExposureType", SqlDbType.VarChar, 12).Value = (object?)observation.ExposureType ?? DBNull.Value;
+                observationCmd.Parameters.Add("@WaterAreaInCorridorM2", SqlDbType.Decimal).Value = (object?)observation.WaterAreaInCorridorM2 ?? DBNull.Value;
+                observationCmd.Parameters.Add("@LengthOnWaterM", SqlDbType.Decimal).Value = (object?)observation.LengthOnWaterM ?? DBNull.Value;
+                observationCmd.Parameters.Add("@NearestWaterDistanceM", SqlDbType.Decimal).Value = (object?)observation.NearestWaterDistanceM ?? DBNull.Value;
+                observationCmd.Parameters.Add("@RouteBinGeometryWkt", SqlDbType.NVarChar, -1).Value = observation.RouteBinWkt;
+                observationCmd.Parameters.Add("@WaterIntersectionGeometryWkt", SqlDbType.NVarChar, -1).Value = (object?)observation.WaterIntersectionWkt ?? DBNull.Value;
+                await observationCmd.ExecuteNonQueryAsync();
+            }
+
+            var savedZones = new List<PipelineWaterZoneResult>();
+            foreach (var zone in request.Zones.OrderBy(zone => zone.ZoneOrdinal))
+            {
+                await using var zoneCmd = new SqlCommand(zoneSql, conn, transaction);
+                zoneCmd.Parameters.Add("@PipelineWaterRunId", SqlDbType.BigInt).Value = runId;
+                zoneCmd.Parameters.Add("@ZoneOrdinal", SqlDbType.Int).Value = zone.ZoneOrdinal;
+                zoneCmd.Parameters.Add("@StartChainageM", SqlDbType.Decimal).Value = zone.StartChainageM;
+                zoneCmd.Parameters.Add("@EndChainageM", SqlDbType.Decimal).Value = zone.EndChainageM;
+                zoneCmd.Parameters.Add("@LengthM", SqlDbType.Decimal).Value = zone.LengthM;
+                zoneCmd.Parameters.Add("@WaterObservationCount", SqlDbType.Int).Value = zone.WaterObservationCount;
+                zoneCmd.Parameters.Add("@DryObservationCount", SqlDbType.Int).Value = zone.DryObservationCount;
+                zoneCmd.Parameters.Add("@UnknownObservationCount", SqlDbType.Int).Value = zone.UnknownObservationCount;
+                zoneCmd.Parameters.Add("@WaterFrequency", SqlDbType.Decimal).Value = (object?)zone.WaterFrequency ?? DBNull.Value;
+                zoneCmd.Parameters.Add("@PersistenceClass", SqlDbType.VarChar, 20).Value = zone.PersistenceClass;
+                zoneCmd.Parameters.Add("@FirstWaterObservedAt", SqlDbType.DateTimeOffset).Value = (object?)zone.FirstWaterObservedAt ?? DBNull.Value;
+                zoneCmd.Parameters.Add("@LastWaterObservedAt", SqlDbType.DateTimeOffset).Value = (object?)zone.LastWaterObservedAt ?? DBNull.Value;
+                zoneCmd.Parameters.Add("@MaximumWaterAreaM2", SqlDbType.Decimal).Value = (object?)zone.MaximumWaterAreaM2 ?? DBNull.Value;
+                zoneCmd.Parameters.Add("@MinimumWaterDistanceM", SqlDbType.Decimal).Value = (object?)zone.MinimumWaterDistanceM ?? DBNull.Value;
+                zoneCmd.Parameters.Add("@RouteZoneGeometryWkt", SqlDbType.NVarChar, -1).Value = zone.RouteZoneWkt;
+                var zoneId = Convert.ToInt64(await zoneCmd.ExecuteScalarAsync(), CultureInfo.InvariantCulture);
+                savedZones.Add(zone with { PipelineWaterZoneId = zoneId });
+            }
+
+            await transaction.CommitAsync();
+            return new PipelineWaterRunSaveResult(runId, savedZones);
+        }
+        catch
+        {
+            await transaction.RollbackAsync();
+            throw;
+        }
+    }
     public async Task DeactivatePipelinePathAsync(long pipelinePathId)
     {
         const string sql = @"

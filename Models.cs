@@ -182,6 +182,7 @@ public sealed record PipelineWaterBinObservation
 
 public sealed record PipelineWaterZoneResult
 {
+    public long? PipelineWaterZoneId { get; init; }
     public int ZoneOrdinal { get; init; }
     public decimal StartChainageM { get; init; }
     public decimal EndChainageM { get; init; }
@@ -196,6 +197,7 @@ public sealed record PipelineWaterZoneResult
     public DateTimeOffset? LastWaterObservedAt { get; init; }
     public decimal? MaximumWaterAreaM2 { get; init; }
     public decimal? MinimumWaterDistanceM { get; init; }
+    public bool HasCentrelineCrossing { get; init; }
     public string RouteZoneWkt { get; init; } = "";
 }
 
