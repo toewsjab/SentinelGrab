@@ -1,4 +1,5 @@
 using System.Net;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 
@@ -20,7 +21,7 @@ public sealed class StacClient
         {
             collections = new[] { "sentinel-2-l2a" },
             bbox = bbox.ToArray(),
-            datetime = $"{from:yyyy-MM-dd}/{to:yyyy-MM-dd}",
+            datetime = BuildDateTimeInterval(from, to),
             limit = limit,
             query = new Dictionary<string, object>
             {
@@ -44,6 +45,20 @@ public sealed class StacClient
         }
 
         return items;
+    }
+
+    private static string BuildDateTimeInterval(DateTime from, DateTime to)
+    {
+        var start = from.Date;
+        var endExclusive = to.Date.AddDays(1);
+        if (endExclusive <= start)
+        {
+            endExclusive = start.AddDays(1);
+        }
+
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"{start:yyyy-MM-dd'T'HH:mm:ss'Z'}/{endExclusive:yyyy-MM-dd'T'HH:mm:ss'Z'}");
     }
 
     public async Task<StacItem?> GetByIdAsync(string id)
