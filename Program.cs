@@ -83,37 +83,24 @@ static async Task RunCliModeAsync(AppConfig config, string projectRoot, string[]
     }
 
     var outputRootPath = ResolveRootPath(config.OutputRootPath, projectRoot);
-    var scriptPath = Path.Combine(projectRoot, "scripts", "BuildTiles_RGB.ps1");
-    if (!File.Exists(scriptPath))
+    var tileBuilder = new GdalProductTileBuilder();
+    var result = await tileBuilder.BuildAsync(new TileBuildRequest
     {
-        Console.WriteLine($"Script not found: {scriptPath}. Skipping tile generation.");
-        return;
-    }
+        JobId = 0,
+        ProductCode = "RGB",
+        DateKey = outputFolder,
+        InputDir = outDir,
+        OutputRootPath = outputRootPath,
+        ProductSubPath = "rgb",
+        ZoomMin = 8,
+        ZoomMax = 16,
+        OsgeoRoot = config.OsgeoRoot,
+        Processes = Math.Max(1, config.DefaultProcesses),
+        ScaleMaxRgb = config.DefaultScaleMaxRGB
+    });
 
-    var parameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-    {
-        ["JobId"] = "0",
-        ["DateKey"] = outputFolder,
-        ["InputDir"] = outDir,
-        ["OutputRootPath"] = outputRootPath,
-        ["OsgeoRoot"] = config.OsgeoRoot,
-        ["ScaleMaxRGB"] = config.DefaultScaleMaxRGB.ToString(CultureInfo.InvariantCulture),
-        ["Processes"] = Math.Max(1, config.DefaultProcesses).ToString(CultureInfo.InvariantCulture)
-    };
-
-    var scriptRunner = new PowerShellScriptRunner();
-    var result = await scriptRunner.RunAsync(scriptPath, parameters);
-    var status = result.ExitCode == 0 ? "Tile generation completed." : "Tile generation failed.";
-    Console.WriteLine($"{status} ExitCode={result.ExitCode}; Duration={result.Duration}.");
-    if (!string.IsNullOrWhiteSpace(result.Stdout))
-    {
-        Console.WriteLine(Truncate(result.Stdout));
-    }
-
-    if (!string.IsNullOrWhiteSpace(result.Stderr))
-    {
-        Console.WriteLine(Truncate(result.Stderr));
-    }
+    Console.WriteLine($"Tile generation completed: {result.OutputDir}");
+    Console.WriteLine(Truncate(result.Log));
 }
 
 static async Task RunDbModeAsync(AppConfig config, string projectRoot)
@@ -234,7 +221,7 @@ static async Task ProcessJobAsync(SentinelGrabJob job, JobRepository repo, AppCo
     }
 
     var outputRootPath = ResolveRootPath(outputRoot, projectRoot);
-    var scriptRunner = new PowerShellScriptRunner();
+    var tileBuilder = new GdalProductTileBuilder();
 
     foreach (var product in products)
     {
@@ -243,76 +230,52 @@ static async Task ProcessJobAsync(SentinelGrabJob job, JobRepository repo, AppCo
             ? product.ProductCode.Trim().ToLowerInvariant()
             : product.OutputSubPath.Trim();
 
-        await repo.UpdateJobProductStatusAsync(product.JobProductId, "Running", null, "Starting script.");
-
-        var scriptPath = Path.Combine(projectRoot, "scripts", $"BuildTiles_{productCode}.ps1");
-        if (!File.Exists(scriptPath))
-        {
-            await repo.UpdateJobProductStatusAsync(product.JobProductId, "Failed", "Script not found.", scriptPath);
-            continue;
-        }
+        await repo.UpdateJobProductStatusAsync(product.JobProductId, "Running", null, "Starting C# tile builder.");
 
         var zoomMin = job.ZoomMin ?? 8;
         var zoomMax = job.ZoomMax ?? 14;
         var processes = Math.Max(1, config.DefaultProcesses);
 
-        var parameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["JobId"] = job.JobId.ToString(CultureInfo.InvariantCulture),
-            ["DateKey"] = dateKey,
-            ["InputDir"] = jobRoot,
-            ["OutputRootPath"] = outputRootPath,
-            ["ProductSubPath"] = productSubPath,
-            ["ZoomMin"] = zoomMin.ToString(CultureInfo.InvariantCulture),
-            ["ZoomMax"] = zoomMax.ToString(CultureInfo.InvariantCulture),
-            ["OsgeoRoot"] = config.OsgeoRoot,
-            ["Processes"] = processes.ToString(CultureInfo.InvariantCulture)
-        };
-
-        if (productCode == "RGB")
-        {
-            parameters["ScaleMaxRGB"] = config.DefaultScaleMaxRGB.ToString(CultureInfo.InvariantCulture);
-        }
-        else
-        {
-            parameters["IndexMin"] = config.DefaultNdviMin.ToString(CultureInfo.InvariantCulture);
-            parameters["IndexMax"] = config.DefaultNdviMax.ToString(CultureInfo.InvariantCulture);
-        }
-
         try
         {
-            var result = await scriptRunner.RunAsync(scriptPath, parameters);
-            var combinedLog = $"ExitCode={result.ExitCode}; Duration={result.Duration};\nSTDOUT:\n{result.Stdout}\nSTDERR:\n{result.Stderr}";
-
-            if (result.ExitCode == 0)
+            var result = await tileBuilder.BuildAsync(new TileBuildRequest
             {
-                var outputDir = Path.Combine(outputRootPath, productSubPath, dateKey);
-                var log = $"Tiles created at: {outputDir}. Template: {outputDir}\\{{z}}\\{{x}}\\{{y}}.png\n{combinedLog}";
-                await repo.UpdateJobProductStatusAsync(product.JobProductId, "Succeeded", null, Truncate(log));
+                JobId = job.JobId,
+                ProductCode = productCode,
+                DateKey = dateKey,
+                InputDir = jobRoot,
+                OutputRootPath = outputRootPath,
+                ProductSubPath = productSubPath,
+                ZoomMin = zoomMin,
+                ZoomMax = zoomMax,
+                OsgeoRoot = config.OsgeoRoot,
+                Processes = processes,
+                ScaleMaxRgb = config.DefaultScaleMaxRGB,
+                IndexMin = config.DefaultNdviMin,
+                IndexMax = config.DefaultNdviMax
+            });
 
-                var available = new AvailableLayer
-                {
-                    JobId = job.JobId,
-                    JobProductId = product.JobProductId,
-                    ProductCode = productCode,
-                    DateKey = dateKey,
-                    DateFrom = dateFrom.Date,
-                    DateTo = dateTo.Date,
-                    BboxMinLon = bbox.MinLon,
-                    BboxMinLat = bbox.MinLat,
-                    BboxMaxLon = bbox.MaxLon,
-                    BboxMaxLat = bbox.MaxLat,
-                    OutputRootPath = outputRootPath,
-                    ProductSubPath = productSubPath,
-                    OutputDir = outputDir
-                };
+            var log = $"Tiles created at: {result.OutputDir}. Template: {result.OutputDir}\\{{z}}\\{{x}}\\{{y}}.png\n{result.Log}";
+            await repo.UpdateJobProductStatusAsync(product.JobProductId, "Succeeded", null, Truncate(log));
 
-                await repo.UpsertAvailableLayerAsync(available);
-            }
-            else
+            var available = new AvailableLayer
             {
-                await repo.UpdateJobProductStatusAsync(product.JobProductId, "Failed", Truncate(result.Stderr), Truncate(combinedLog));
-            }
+                JobId = job.JobId,
+                JobProductId = product.JobProductId,
+                ProductCode = productCode,
+                DateKey = dateKey,
+                DateFrom = dateFrom.Date,
+                DateTo = dateTo.Date,
+                BboxMinLon = bbox.MinLon,
+                BboxMinLat = bbox.MinLat,
+                BboxMaxLon = bbox.MaxLon,
+                BboxMaxLat = bbox.MaxLat,
+                OutputRootPath = outputRootPath,
+                ProductSubPath = productSubPath,
+                OutputDir = result.OutputDir
+            };
+
+            await repo.UpsertAvailableLayerAsync(available);
         }
         catch (Exception ex)
         {
