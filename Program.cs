@@ -190,8 +190,25 @@ static async Task RunAutomaticImageryWindowAsync(
     Console.WriteLine($"Searching {rangeStart:yyyy-MM-dd} through {rangeEnd:yyyy-MM-dd}.");
 
     using var http = CreateHttpClient();
-    var stac = new StacClient(http);
-    var items = await stac.SearchAsync(bbox, rangeStart, rangeEnd, cloudMax, 100);
+    var stac = CreateStacClient(http, config);
+    List<StacItem> items;
+    try
+    {
+        items = await stac.SearchAsync(bbox, rangeStart, rangeEnd, cloudMax, 100);
+    }
+    catch (HttpRequestException ex)
+    {
+        Console.WriteLine(
+            $"STAC search failed for {rangeStart:yyyy-MM-dd} through {rangeEnd:yyyy-MM-dd}; skipping this window. {ex.Message}");
+        return;
+    }
+    catch (TaskCanceledException ex)
+    {
+        Console.WriteLine(
+            $"STAC search timed out for {rangeStart:yyyy-MM-dd} through {rangeEnd:yyyy-MM-dd}; skipping this window. {ex.Message}");
+        return;
+    }
+
     if (items.Count == 0)
     {
         Console.WriteLine($"No Sentinel scenes found for {rangeStart:yyyy-MM-dd} through {rangeEnd:yyyy-MM-dd}.");
@@ -210,12 +227,21 @@ static async Task RunAutomaticImageryWindowAsync(
     if (config.FarmCloudScreening.Enabled)
     {
         var selector = new FarmSceneSelector(downloader, new GdalToolRunner(osgeoRoot));
-        var selection = await selector.SelectAsync(
-            items,
-            bbox,
-            Path.Combine(runRoot, "screening"),
-            config.FarmCloudScreening);
-        selectedCandidate = selection.Selected;
+        try
+        {
+            var selection = await selector.SelectAsync(
+                items,
+                bbox,
+                Path.Combine(runRoot, "screening"),
+                config.FarmCloudScreening);
+            selectedCandidate = selection.Selected;
+        }
+        catch (InvalidOperationException ex)
+        {
+            Console.WriteLine(
+                $"No acceptable Sentinel acquisition for {rangeStart:yyyy-MM-dd} through {rangeEnd:yyyy-MM-dd}: {ex.Message}");
+            return;
+        }
     }
     else
     {
@@ -286,7 +312,7 @@ static async Task RunAutomaticImageryWindowAsync(
 
     try
     {
-        await ProcessJobAsync(job, repo, config, projectRoot);
+        await ProcessJobAsync(job, repo, config, projectRoot, selectedCandidate);
     }
     catch (Exception ex)
     {
@@ -344,7 +370,7 @@ static async Task RunCliModeAsync(AppConfig config, string projectRoot, string[]
     Directory.CreateDirectory(outDir);
 
     using var http = CreateHttpClient();
-    var stac = new StacClient(http);
+    var stac = CreateStacClient(http, config);
     var items = await stac.SearchAsync(bbox, rangeStart, rangeEnd, cloudMax, 100);
 
     if (items.Count == 0)
@@ -465,7 +491,12 @@ static async Task RunDbModeAsync(AppConfig config, string projectRoot)
     }
 }
 
-static async Task ProcessJobAsync(SentinelGrabJob job, JobRepository repo, AppConfig config, string projectRoot)
+static async Task ProcessJobAsync(
+    SentinelGrabJob job,
+    JobRepository repo,
+    AppConfig config,
+    string projectRoot,
+    FarmSceneCandidate? preselectedCandidate = null)
 {
     var products = await repo.GetPendingProductsAsync(job.JobId);
     if (products.Count == 0)
@@ -489,7 +520,7 @@ static async Task ProcessJobAsync(SentinelGrabJob job, JobRepository repo, AppCo
         Directory.CreateDirectory(pipelineJobRoot);
 
         using var pipelineHttp = CreateHttpClient();
-        var pipelineStac = new StacClient(pipelineHttp);
+        var pipelineStac = CreateStacClient(pipelineHttp, config);
         var pipelineCloudMax = job.CloudCoverMax ?? 100;
         foreach (var product in pipelineProducts)
         {
@@ -560,10 +591,17 @@ static async Task ProcessJobAsync(SentinelGrabJob job, JobRepository repo, AppCo
     Directory.CreateDirectory(jobRoot);
 
     using var http = CreateHttpClient();
-    var stac = new StacClient(http);
+    var stac = CreateStacClient(http, config);
     List<StacItem> items;
     var sceneId = job.SceneId?.Trim();
-    if (!string.IsNullOrWhiteSpace(sceneId))
+    if (preselectedCandidate is not null)
+    {
+        Console.WriteLine($"Using preselected acquisition {preselectedCandidate.AcquisitionKey}.");
+        items = preselectedCandidate.Items.ToList();
+        wantMultiple = items.Count > 1;
+        maxScenes = items.Count;
+    }
+    else if (!string.IsNullOrWhiteSpace(sceneId))
     {
         Console.WriteLine($"Using SceneId {sceneId}.");
         var item = await stac.GetByIdAsync(sceneId);
@@ -593,8 +631,18 @@ static async Task ProcessJobAsync(SentinelGrabJob job, JobRepository repo, AppCo
     IReadOnlyList<StacItem> selected;
     IReadOnlyDictionary<string, string>? selectedSceneFolders = null;
     string tileInputDir;
+    string sceneRoot = jobRoot;
 
-    if (string.IsNullOrWhiteSpace(sceneId) && config.FarmCloudScreening.Enabled)
+    if (preselectedCandidate is not null)
+    {
+        selected = preselectedCandidate.Items;
+        selectedSceneFolders = preselectedCandidate.SceneFolders.Count > 0
+            ? preselectedCandidate.SceneFolders
+            : null;
+        tileInputDir = preselectedCandidate.InputDir;
+        sceneRoot = tileInputDir;
+    }
+    else if (string.IsNullOrWhiteSpace(sceneId) && config.FarmCloudScreening.Enabled)
     {
         if (string.IsNullOrWhiteSpace(config.OsgeoRoot))
         {
@@ -641,8 +689,8 @@ static async Task ProcessJobAsync(SentinelGrabJob job, JobRepository repo, AppCo
         else
         {
             sceneFolder = selected.Count == 1 && !wantMultiple
-                ? Path.Combine(jobRoot, "single")
-                : Path.Combine(jobRoot, SanitizePathSegment(item.Id));
+                ? Path.Combine(sceneRoot, "single")
+                : Path.Combine(sceneRoot, SanitizePathSegment(item.Id));
         }
 
         Directory.CreateDirectory(sceneFolder);
@@ -973,9 +1021,15 @@ static string ResolveMode(string[] args, AppConfig config)
 
 static string? GetArgValue(string[] args, string name)
 {
+    var alternateName = name.StartsWith("--", StringComparison.Ordinal)
+        ? "-" + name[2..]
+        : null;
+
     for (var i = 0; i < args.Length; i++)
     {
-        if (string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+        if ((string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase)
+                || (alternateName is not null && string.Equals(args[i], alternateName, StringComparison.OrdinalIgnoreCase)))
+            && i + 1 < args.Length)
         {
             return args[i + 1];
         }
@@ -1042,6 +1096,11 @@ static HttpClient CreateHttpClient()
     };
 
     return http;
+}
+
+static StacClient CreateStacClient(HttpClient http, AppConfig config)
+{
+    return new StacClient(http, config.PlanetaryComputer.ToStacClientOptions());
 }
 
 static string ResolveRootPath(string path, string projectRoot)

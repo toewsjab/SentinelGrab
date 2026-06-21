@@ -50,6 +50,24 @@ dotnet SentinelGrab.dll --mode range --from 2025-05-01 --to 2025-05-31
 
 Range mode checks each calendar day in the range and processes configured products for dates with acceptable imagery.
 
+## Planetary Computer access
+
+SentinelGrab can optionally send a Planetary Computer subscription key when signing asset URLs for download:
+
+```json
+"PlanetaryComputer": {
+  "SubscriptionKey": "",
+  "StacSearchUrl": "",
+  "SasSignUrl": ""
+}
+```
+
+`SubscriptionKey` is optional. If it is blank, SentinelGrab also checks the `PC_SDK_SUBSCRIPTION_KEY` environment variable. The key is sent only to the SAS/signing request using the `Ocp-Apim-Subscription-Key` header; STAC search requests stay unchanged.
+
+`StacSearchUrl` and `SasSignUrl` are optional advanced endpoint overrides. Leave them blank to use the public Planetary Computer defaults.
+
+Azure West Europe is not a SentinelGrab setting. To reduce latency to Planetary Computer data, run SentinelGrab on an Azure VM or App Service located in the `West Europe` region, then write or sync the finished tiles back to the tile server.
+
 ## SCL interpretation
 
 The selector counts SCL classes 8, 9, and 10 as cloud and class 3 as cloud shadow. Snow (11), unclassified/low-probability cloud (7), and saturated/defective pixels (1) are reported separately and do not currently fail the cloud threshold.

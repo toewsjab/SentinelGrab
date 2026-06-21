@@ -30,6 +30,42 @@ public sealed class StacClientTests
         Assert.Equal(new[] { "item-a", "item-b" }, items.Select(item => item.Id).ToArray());
         Assert.Equal(2, handler.RequestBodies.Count);
         Assert.Contains("\"token\":\"next-page\"", handler.RequestBodies[1]);
+        Assert.All(handler.Requests, request => Assert.False(request.Headers.Contains(StacClient.SubscriptionKeyHeaderName)));
+    }
+
+    [Fact]
+    public async Task SignHrefSendsConfiguredSubscriptionKeyOnlyToSigningRequest()
+    {
+        var handler = new QueueHandler(
+            FeatureCollection(
+                new[] { Feature("item-a", "2026-05-01T16:00:00Z", "take-1", "13UDQ") },
+                nextToken: null),
+            "{\"href\":\"https://signed.test/cog.tif?sig=secret\"}");
+        var client = new StacClient(
+            new HttpClient(handler),
+            new StacClientOptions(
+                SubscriptionKey: "test-key",
+                StacSearchUrl: "https://example.test/stac/search",
+                SasSignUrl: "https://example.test/sas/sign"));
+
+        await client.SearchIntersectsAsync(
+            """
+            {"type":"Polygon","coordinates":[[[-103,50],[-102.9,50],[-102.9,50.1],[-103,50.1],[-103,50]]]}
+            """,
+            new DateTime(2026, 5, 1),
+            new DateTime(2026, 5, 1),
+            100,
+            50);
+        var signed = await client.SignHrefAsync("https://asset.test/cog.tif");
+
+        Assert.Equal("https://signed.test/cog.tif?sig=secret", signed);
+        Assert.Equal(HttpMethod.Post, handler.Requests[0].Method);
+        Assert.Equal("https://example.test/stac/search", handler.Requests[0].RequestUri?.ToString());
+        Assert.False(handler.Requests[0].Headers.Contains(StacClient.SubscriptionKeyHeaderName));
+        Assert.Equal(HttpMethod.Get, handler.Requests[1].Method);
+        Assert.Equal("https://example.test/sas/sign?href=https%3A%2F%2Fasset.test%2Fcog.tif", handler.Requests[1].RequestUri?.ToString());
+        Assert.True(handler.Requests[1].Headers.TryGetValues(StacClient.SubscriptionKeyHeaderName, out var values));
+        Assert.Equal(new[] { "test-key" }, values);
     }
 
     [Fact]
@@ -83,10 +119,16 @@ public sealed class StacClientTests
         }
 
         public List<string> RequestBodies { get; } = new();
+        public List<HttpRequestMessage> Requests { get; } = new();
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            RequestBodies.Add(await request.Content!.ReadAsStringAsync(cancellationToken));
+            Requests.Add(request);
+            if (request.Content is not null)
+            {
+                RequestBodies.Add(await request.Content.ReadAsStringAsync(cancellationToken));
+            }
+
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(_responses.Dequeue(), Encoding.UTF8, "application/json")

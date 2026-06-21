@@ -36,3 +36,31 @@ Use `Invoke-SentinelGrab.ps1` when you want the raw mode wrapper:
 ```powershell
 .\scripts\Invoke-SentinelGrab.ps1 -Mode range -- --from 2025-05-01 --to 2025-05-31 --products RGB,NDVI
 ```
+
+## Published server scripts
+
+Use these on the server from a published folder. They do not build the project and do not call `dotnet run`; they launch the already published `SentinelGrab.exe`, or `SentinelGrab.dll` with `-UseDll`.
+
+```powershell
+.\scripts\Run-PublishedSentinelGrabDaily.ps1
+.\scripts\Run-PublishedSentinelGrabRange.ps1 -From 2025-05-01 -To 2025-05-31
+```
+
+If the scripts are somewhere other than the published app's `scripts` folder, point them at the published app:
+
+```powershell
+.\scripts\Run-PublishedSentinelGrabDaily.ps1 -PublishedRoot D:\jtprograms\SentinelGrab
+.\scripts\Run-PublishedSentinelGrabRange.ps1 -PublishedRoot D:\jtprograms\SentinelGrab -From 2025-05-01 -To 2025-05-31
+```
+
+For Task Scheduler, use `powershell.exe` with arguments like:
+
+```text
+-NoProfile -ExecutionPolicy Bypass -File "D:\jtprograms\SentinelGrab\scripts\Run-PublishedSentinelGrabDaily.ps1"
+```
+
+If the published scripts are not copied to the server folder, run them from wherever they are and supply the published app folder:
+
+```text
+-NoProfile -ExecutionPolicy Bypass -File "C:\code\JTF\SentinelGrab\scripts\Run-PublishedSentinelGrabDaily.ps1" -PublishedRoot "D:\jtprograms\SentinelGrab"
+```

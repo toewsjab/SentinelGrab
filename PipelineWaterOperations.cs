@@ -71,7 +71,9 @@ public static class PipelineWaterOperations
         }
 
         using var http = CreateHttpClient();
-        var processor = new PipelineWaterProcessor(new StacClient(http), PipelineWaterDetectorFactory.Create());
+        var processor = new PipelineWaterProcessor(
+            new StacClient(http, config.PlanetaryComputer.ToStacClientOptions()),
+            PipelineWaterDetectorFactory.Create());
         var result = await processor.BuildAsync(new PipelineWaterProcessingRequest
         {
             JobId = jobId,

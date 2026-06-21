@@ -32,14 +32,34 @@ public sealed record StacAcquisitionGroup(
         .ToList();
 }
 
+public sealed record StacClientOptions(
+    string? SubscriptionKey = null,
+    string? StacSearchUrl = null,
+    string? SasSignUrl = null);
+
 public sealed class StacClient
 {
-    private readonly HttpClient _http;
-    private const string SearchUrl = "https://planetarycomputer.microsoft.com/api/stac/v1/search";
+    public const string DefaultSearchUrl = "https://planetarycomputer.microsoft.com/api/stac/v1/search";
+    public const string DefaultSasSignUrl = "https://planetarycomputer.microsoft.com/api/sas/v1/sign";
+    public const string SubscriptionKeyHeaderName = "Ocp-Apim-Subscription-Key";
 
-    public StacClient(HttpClient http)
+    private readonly HttpClient _http;
+    private readonly string _searchUrl;
+    private readonly string _sasSignUrl;
+    private readonly string? _subscriptionKey;
+
+    public StacClient(HttpClient http, StacClientOptions? options = null)
     {
         _http = http;
+        _searchUrl = string.IsNullOrWhiteSpace(options?.StacSearchUrl)
+            ? DefaultSearchUrl
+            : options.StacSearchUrl;
+        _sasSignUrl = string.IsNullOrWhiteSpace(options?.SasSignUrl)
+            ? DefaultSasSignUrl
+            : options.SasSignUrl;
+        _subscriptionKey = string.IsNullOrWhiteSpace(options?.SubscriptionKey)
+            ? null
+            : options.SubscriptionKey;
     }
 
     public Task<List<StacItem>> SearchAsync(
@@ -132,8 +152,20 @@ public sealed class StacClient
 
     public async Task<string> SignHrefAsync(string href, CancellationToken cancellationToken = default)
     {
-        var signEndpoint = "https://planetarycomputer.microsoft.com/api/sas/v1/sign?href=" + Uri.EscapeDataString(href);
-        using var resp = await SendWithRetryAsync(() => _http.GetAsync(signEndpoint, cancellationToken), "STAC asset signing", cancellationToken);
+        var signEndpoint = BuildSignEndpoint(href);
+        using var resp = await SendWithRetryAsync(
+            () =>
+            {
+                var request = new HttpRequestMessage(HttpMethod.Get, signEndpoint);
+                if (!string.IsNullOrWhiteSpace(_subscriptionKey))
+                {
+                    request.Headers.Add(SubscriptionKeyHeaderName, _subscriptionKey);
+                }
+
+                return _http.SendAsync(request, cancellationToken);
+            },
+            "STAC asset signing",
+            cancellationToken);
         resp.EnsureSuccessStatusCode();
 
         var body = await resp.Content.ReadAsStringAsync(cancellationToken);
@@ -198,7 +230,7 @@ public sealed class StacClient
 
             var payloadJson = JsonSerializer.Serialize(payload);
             using var resp = await SendWithRetryAsync(
-                () => _http.PostAsync(SearchUrl, new StringContent(payloadJson, Encoding.UTF8, "application/json"), cancellationToken),
+                () => _http.PostAsync(_searchUrl, new StringContent(payloadJson, Encoding.UTF8, "application/json"), cancellationToken),
                 operationName,
                 cancellationToken);
             resp.EnsureSuccessStatusCode();
@@ -241,6 +273,12 @@ public sealed class StacClient
         return string.Create(
             CultureInfo.InvariantCulture,
             $"{start:yyyy-MM-dd'T'HH:mm:ss'Z'}/{endExclusive:yyyy-MM-dd'T'HH:mm:ss'Z'}");
+    }
+
+    private string BuildSignEndpoint(string href)
+    {
+        var separator = _sasSignUrl.Contains('?', StringComparison.Ordinal) ? '&' : '?';
+        return _sasSignUrl + separator + "href=" + Uri.EscapeDataString(href);
     }
 
     private static void ValidateIntersectsGeometry(string geoJson)

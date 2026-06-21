@@ -17,6 +17,7 @@ public sealed class AppConfig
     public WaterDetectionConfig WaterDetection { get; set; } = new();
     public PipelineWaterConfig PipelineWater { get; set; } = new();
     public DailyCheckConfig DailyCheck { get; set; } = new();
+    public PlanetaryComputerConfig PlanetaryComputer { get; set; } = new();
 
     public static AppConfig Load(string basePath)
     {
@@ -34,10 +35,40 @@ public sealed class AppConfig
             config.SqlConnectionString = envConn;
         }
 
+        config.PlanetaryComputer.ApplyEnvironmentFallback(configRoot);
         config.WaterDetection.Validate();
         config.PipelineWater.Validate();
 
         return config;
+    }
+}
+
+public sealed class PlanetaryComputerConfig
+{
+    public string? SubscriptionKey { get; set; }
+    public string? StacSearchUrl { get; set; }
+    public string? SasSignUrl { get; set; }
+
+    public void ApplyEnvironmentFallback(IConfiguration configRoot)
+    {
+        if (!string.IsNullOrWhiteSpace(SubscriptionKey))
+        {
+            return;
+        }
+
+        var envKey = configRoot["PC_SDK_SUBSCRIPTION_KEY"];
+        if (!string.IsNullOrWhiteSpace(envKey))
+        {
+            SubscriptionKey = envKey;
+        }
+    }
+
+    public StacClientOptions ToStacClientOptions()
+    {
+        return new StacClientOptions(
+            string.IsNullOrWhiteSpace(SubscriptionKey) ? null : SubscriptionKey,
+            string.IsNullOrWhiteSpace(StacSearchUrl) ? null : StacSearchUrl,
+            string.IsNullOrWhiteSpace(SasSignUrl) ? null : SasSignUrl);
     }
 }
 
@@ -246,7 +277,7 @@ public sealed class DailyCheckConfig
     public int LookbackDays { get; set; } = 14;
     public int LagDays { get; set; } = 1;
     public string[] ProductCodes { get; set; } = new[] { "RGB", "NDVI", "NDMI", "NDRE" };
-    public int ZoomMin { get; set; } = 8;
+    public int ZoomMin { get; set; } = 14;
     public int ZoomMax { get; set; } = 14;
     public int Priority { get; set; } = 50;
     public string Layer { get; set; } = "Sentinel-2 L2A";
